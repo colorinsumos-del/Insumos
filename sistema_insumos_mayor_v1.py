@@ -40,7 +40,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V2 Fix15 Railway"
+APP_NAME = "Sistema de Insumos al Mayor V2 Fix16 Categorías"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -384,10 +384,16 @@ def init_db():
     add_col("pedidos", "pos_usuario", "TEXT")
     add_col("pedidos", "pos_notas", "TEXT")
 
-    # Categorías iniciales
-    for i, cat in enumerate(["Papeles", "Stickers", "Sublimación", "Tintas", "Rollos", "Equipos", "General"], start=1):
-        q("INSERT OR IGNORE INTO categorias (nombre, descripcion, activa, orden, creado_en) VALUES (?,?,?,?,?)",
-          (cat, "", 1, i, now()))
+    # Categorías iniciales:
+    # Se crean una sola vez. Antes se recreaban en cada arranque si el admin las borraba.
+    categorias_flag = q("SELECT valor FROM configuracion WHERE clave='categorias_iniciales_creadas'", fetch=True)
+    if not categorias_flag:
+        existentes = q("SELECT COUNT(*) AS n FROM categorias", fetch=True)[0]["n"]
+        if int(existentes or 0) == 0:
+            for i, cat in enumerate(["Papeles", "Stickers", "Sublimación", "Tintas", "Rollos", "Equipos", "General"], start=1):
+                q("INSERT OR IGNORE INTO categorias (nombre, descripcion, activa, orden, creado_en) VALUES (?,?,?,?,?)",
+                  (cat, "", 1, i, now()))
+        q("INSERT OR REPLACE INTO configuracion (clave, valor) VALUES (?,?)", ("categorias_iniciales_creadas", "1"))
 
     # Admin inicial
     admin = q("SELECT username FROM usuarios WHERE username=?", ("colorinsumos@gmail.com",), fetch=True)
@@ -1544,6 +1550,7 @@ def admin_config():
 
 def admin_categorias():
     st.title("🗂️ Categorías")
+    st.caption("Las categorías eliminadas ya no se regeneran automáticamente al reiniciar la app.")
     with st.form("crear_cat"):
         c1, c2, c3 = st.columns([2,3,1])
         nombre = c1.text_input("Nueva categoría")
