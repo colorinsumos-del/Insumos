@@ -1,4 +1,4 @@
-# Sistema de Insumos al Mayor V2 Fix14 Rentabilidad Categorías
+# Sistema de Insumos al Mayor V2 Fix15 Railway
 
 Primera versión local funcional.
 
@@ -309,3 +309,18 @@ La app guardará allí archivos `.json` y copia `.db`.
   - Se eliminó el bloque “Ver coincidencias encontradas”.
   - Se agregó filtro por categoría.
   - La lista desplegable ahora muestra los productos filtrados por categoría y búsqueda.
+
+
+## Cambios V2 Fix15 Railway
+
+- Corrige error en Railway:
+  - `TypeError: 'NoneType' object is not subscriptable`
+- Si la sesión pierde `st.session_state.user`, vuelve al login en vez de romper.
+- Incluye `Procfile`.
+- Incluye `railway.json`.
+
+Start command recomendado:
+
+```bash
+streamlit run sistema_insumos_mayor_v1.py --server.address=0.0.0.0 --server.port=$PORT
+```

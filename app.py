@@ -40,7 +40,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V2 Fix14 Rentabilidad Categorías"
+APP_NAME = "Sistema de Insumos al Mayor V2 Fix15 Railway"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -3153,11 +3153,33 @@ if "user" not in st.session_state:
 if "menu" not in st.session_state:
     st.session_state.menu = "Tienda"
 
-if not st.session_state.auth:
+# Protección extra para Railway / reinicios de sesión:
+# Puede ocurrir que auth quede True pero user sea None.
+if not st.session_state.auth or st.session_state.user is None:
+    st.session_state.auth = False
+    st.session_state.user = None
     login_screen()
     st.stop()
 
-user = get_user(st.session_state.user["username"])
+try:
+    username_actual = st.session_state.user.get("username")
+except Exception:
+    username_actual = None
+
+if not username_actual:
+    st.session_state.auth = False
+    st.session_state.user = None
+    login_screen()
+    st.stop()
+
+user = get_user(username_actual)
+
+if user is None:
+    st.session_state.auth = False
+    st.session_state.user = None
+    st.error("La sesión perdió el usuario o el usuario ya no existe. Inicia sesión nuevamente.")
+    login_screen()
+    st.stop()
 
 with st.sidebar:
     st.title("📦 Insumos Mayor")
