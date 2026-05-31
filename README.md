@@ -1,4 +1,4 @@
-# Sistema de Insumos al Mayor V2 Fix18 Campos Visibles
+# Sistema de Insumos al Mayor V2 Fix19 CSS Limpio
 
 Primera versión local funcional.
 
@@ -351,4 +351,17 @@ streamlit run sistema_insumos_mayor_v1.py --server.address=0.0.0.0 --server.port
 - Inputs, selectbox, textarea y campos numéricos ahora tienen borde visible siempre.
 - El borde azul queda solo como estado activo/focus.
 - Formularios con borde más claro y look más profesional.
+- No modifica lógica del sistema.
+
+
+## Cambios V2 Fix19 CSS Limpio
+
+- Corrige los rectángulos redondeados que aparecían encima de las fotos del catálogo.
+- El CSS de bordes ahora aplica solo a widgets reales:
+  - Text input
+  - Number input
+  - Selectbox
+  - Text area
+  - Date input
+- Mantiene los campos visibles, pero sin afectar elementos internos de las cards.
 - No modifica lógica del sistema.

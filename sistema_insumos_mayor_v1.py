@@ -40,7 +40,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V2 Fix18 Campos Visibles"
+APP_NAME = "Sistema de Insumos al Mayor V2 Fix19 CSS Limpio"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -133,34 +133,32 @@ div[data-testid="stDialog"] div[role="dialog"] {
     .block-container {padding-left:.7rem;padding-right:.7rem;}
 }
 
-/* Campos siempre visibles */
-div[data-baseweb="input"] > div,
-div[data-baseweb="select"] > div,
-div[data-baseweb="textarea"] > div,
-div[data-baseweb="base-input"],
-input,
-textarea {
+/* Campos siempre visibles, pero solo widgets reales de Streamlit.
+   Evita pintar bordes en elementos internos del catálogo/imágenes. */
+div[data-testid="stTextInput"] div[data-baseweb="input"] > div,
+div[data-testid="stNumberInput"] div[data-baseweb="input"] > div,
+div[data-testid="stSelectbox"] div[data-baseweb="select"] > div,
+div[data-testid="stTextArea"] div[data-baseweb="textarea"] > div,
+div[data-testid="stDateInput"] div[data-baseweb="input"] > div {
     background-color: #ffffff !important;
     border: 1.4px solid #cbd5e1 !important;
     border-radius: 10px !important;
     box-shadow: none !important;
 }
 
-div[data-baseweb="input"] > div:hover,
-div[data-baseweb="select"] > div:hover,
-div[data-baseweb="textarea"] > div:hover,
-div[data-baseweb="base-input"]:hover,
-input:hover,
-textarea:hover {
+div[data-testid="stTextInput"] div[data-baseweb="input"] > div:hover,
+div[data-testid="stNumberInput"] div[data-baseweb="input"] > div:hover,
+div[data-testid="stSelectbox"] div[data-baseweb="select"] > div:hover,
+div[data-testid="stTextArea"] div[data-baseweb="textarea"] > div:hover,
+div[data-testid="stDateInput"] div[data-baseweb="input"] > div:hover {
     border-color: #94a3b8 !important;
 }
 
-div[data-baseweb="input"] > div:focus-within,
-div[data-baseweb="select"] > div:focus-within,
-div[data-baseweb="textarea"] > div:focus-within,
-div[data-baseweb="base-input"]:focus-within,
-input:focus,
-textarea:focus {
+div[data-testid="stTextInput"] div[data-baseweb="input"] > div:focus-within,
+div[data-testid="stNumberInput"] div[data-baseweb="input"] > div:focus-within,
+div[data-testid="stSelectbox"] div[data-baseweb="select"] > div:focus-within,
+div[data-testid="stTextArea"] div[data-baseweb="textarea"] > div:focus-within,
+div[data-testid="stDateInput"] div[data-baseweb="input"] > div:focus-within {
     border-color: #2a42ed !important;
     box-shadow: 0 0 0 2px rgba(42, 66, 237, 0.12) !important;
 }
@@ -189,6 +187,12 @@ div[data-testid="stForm"] {
 .stButton > button {
     border-radius: 10px !important;
     border: 1px solid #cbd5e1 !important;
+}
+
+/* Evita que elementos vacíos del layout se vean como separadores */
+.product-card div:empty {
+    border: none !important;
+    background: transparent !important;
 }
 
 </style>
