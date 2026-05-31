@@ -40,7 +40,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V2 Fix19 CSS Limpio"
+APP_NAME = "Sistema de Insumos al Mayor V2 Fix20 Carrito Docena"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -974,10 +974,10 @@ def producto_precio_presentacion(prod, presentacion):
     if presentacion == "unidad":
         return float(prod["precio_unidad"] or 0), 1
     if presentacion == "docena":
-        return float(prod["precio_docena"] or 0), 12
+        # precio_docena es precio unitario dentro de la docena.
+        return float(prod["precio_docena"] or 0) * 12, 12
     if presentacion == "bulto":
-        # precio_bulto se maneja como precio unitario dentro del bulto.
-        # Total de 1 bulto = precio_bulto * bulto_contiene.
+        # precio_bulto es precio unitario dentro del bulto.
         bulto_contiene = int(prod["bulto_contiene"] or 1)
         return float(prod["precio_bulto"] or 0) * bulto_contiene, bulto_contiene
     return float(prod["precio_unidad"] or 0), 1
@@ -1032,7 +1032,8 @@ def calcular_precio_inteligente(prod, presentacion, cantidad_presentacion):
 
     if maneja_docena and precio_docena > 0 and restante >= 12:
         n_docenas = restante // 12
-        total += n_docenas * precio_docena
+        # precio_docena es precio unitario dentro de la docena.
+        total += n_docenas * precio_docena * 12
         restante -= n_docenas * 12
         partes.append(f"{n_docenas} docena(s)")
 
@@ -1130,9 +1131,6 @@ def recalcular_item_carrito(item, nueva_cantidad=None):
 def texto_linea_carrito(item):
     """
     Texto comercial correcto para el carrito.
-    - Unidad con cantidad 12 muestra: 12 unidades · Precio aplicado: 1 docena.
-    - Docena muestra: 1 docena = 12 unidades · Precio docena.
-    - Bulto muestra: 1 bulto = X unidades · Precio bulto.
     """
     presentacion = item.get("presentacion", "unidad")
     cantidad = int(item.get("cantidad_presentacion", 1))
@@ -1143,11 +1141,10 @@ def texto_linea_carrito(item):
     if presentacion == "unidad":
         return f"{unidades} unidad(es) · Precio aplicado: {escala}"
 
-    # En presentaciones cerradas, la cantidad representa cantidad de docenas/bultos.
     if cantidad == 1:
-        return f"1 {presentacion} = {unidades} unidad(es) · Precio {presentacion}: {money_usd(precio_total)}"
+        return f"1 {presentacion} = {unidades} unidad(es) · Total {presentacion}: {money_usd(precio_total)}"
 
-    precio_pres = float(item.get("precio_total", 0) or 0) / cantidad if cantidad else 0
+    precio_pres = precio_total / cantidad if cantidad else 0
     return f"{cantidad} {presentacion}(s) = {unidades} unidad(es) · {money_usd(precio_pres)} c/{presentacion}"
 
 
