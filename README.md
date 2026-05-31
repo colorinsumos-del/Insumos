@@ -1,4 +1,4 @@
-# Sistema de Insumos al Mayor V2 Fix15 Railway
+# Sistema de Insumos al Mayor V2 Fix18 Campos Visibles
 
 Primera versión local funcional.
 
@@ -324,3 +324,31 @@ Start command recomendado:
 ```bash
 streamlit run sistema_insumos_mayor_v1.py --server.address=0.0.0.0 --server.port=$PORT
 ```
+
+
+## Cambios V2 Fix16 Categorías
+
+- Corrige el problema donde las categorías eliminadas se volvían a crear al reiniciar.
+- Las categorías iniciales ahora solo se crean una vez y solo si la tabla está vacía.
+- Se agrega bandera interna `categorias_iniciales_creadas`.
+
+
+## Cambios V2 Fix17 Light Theme
+
+- Se agrega `.streamlit/config.toml`.
+- El sistema fuerza el tema Light desde el primer ingreso.
+- Ya no depende del modo `System` del navegador o del dispositivo.
+- Configuración aplicada:
+  - `base = "light"`
+  - fondo blanco
+  - sidebar claro
+  - color principal azul corporativo
+
+
+## Cambios V2 Fix18 Campos Visibles
+
+- Mejora visual de formularios.
+- Inputs, selectbox, textarea y campos numéricos ahora tienen borde visible siempre.
+- El borde azul queda solo como estado activo/focus.
+- Formularios con borde más claro y look más profesional.
+- No modifica lógica del sistema.

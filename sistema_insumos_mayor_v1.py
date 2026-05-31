@@ -40,7 +40,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V2 Fix16 Categorías"
+APP_NAME = "Sistema de Insumos al Mayor V2 Fix18 Campos Visibles"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -132,6 +132,65 @@ div[data-testid="stDialog"] div[role="dialog"] {
 @media (max-width: 768px) {
     .block-container {padding-left:.7rem;padding-right:.7rem;}
 }
+
+/* Campos siempre visibles */
+div[data-baseweb="input"] > div,
+div[data-baseweb="select"] > div,
+div[data-baseweb="textarea"] > div,
+div[data-baseweb="base-input"],
+input,
+textarea {
+    background-color: #ffffff !important;
+    border: 1.4px solid #cbd5e1 !important;
+    border-radius: 10px !important;
+    box-shadow: none !important;
+}
+
+div[data-baseweb="input"] > div:hover,
+div[data-baseweb="select"] > div:hover,
+div[data-baseweb="textarea"] > div:hover,
+div[data-baseweb="base-input"]:hover,
+input:hover,
+textarea:hover {
+    border-color: #94a3b8 !important;
+}
+
+div[data-baseweb="input"] > div:focus-within,
+div[data-baseweb="select"] > div:focus-within,
+div[data-baseweb="textarea"] > div:focus-within,
+div[data-baseweb="base-input"]:focus-within,
+input:focus,
+textarea:focus {
+    border-color: #2a42ed !important;
+    box-shadow: 0 0 0 2px rgba(42, 66, 237, 0.12) !important;
+}
+
+/* Number input buttons más limpios */
+button[data-testid="stNumberInputStepUp"],
+button[data-testid="stNumberInputStepDown"] {
+    border-left: 1px solid #e2e8f0 !important;
+    background: #f8fafc !important;
+}
+
+/* Checkboxes más visibles */
+label[data-testid="stWidgetLabel"] {
+    color: #0f172a !important;
+    font-weight: 600 !important;
+}
+
+/* Contenedores de formularios */
+div[data-testid="stForm"] {
+    border: 1px solid #e2e8f0 !important;
+    border-radius: 14px !important;
+    background: #ffffff !important;
+}
+
+/* Botones con borde suave */
+.stButton > button {
+    border-radius: 10px !important;
+    border: 1px solid #cbd5e1 !important;
+}
+
 </style>
 """, unsafe_allow_html=True)
 
