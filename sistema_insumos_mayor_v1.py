@@ -40,7 +40,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V2 Fix20 Carrito Docena"
+APP_NAME = "Sistema de Insumos al Mayor V2 Fix22 PDF Unicode"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -224,6 +224,36 @@ def now():
 
 def now_file():
     return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+def toast_ok(msg: str):
+    try:
+        st.toast(msg, icon="✅")
+    except Exception:
+        st.success(msg)
+
+def set_feedback(msg: str, kind: str = "success"):
+    st.session_state["_feedback_msg"] = msg
+    st.session_state["_feedback_kind"] = kind
+
+def show_feedback():
+    msg = st.session_state.pop("_feedback_msg", None)
+    kind = st.session_state.pop("_feedback_kind", "success")
+    if not msg:
+        return
+    if kind == "warning":
+        st.warning(msg)
+    elif kind == "error":
+        st.error(msg)
+    elif kind == "info":
+        st.info(msg)
+    else:
+        st.success(msg)
+
+def carrito_resumen_texto(username: str):
+    carrito = cargar_carrito(username)
+    total_unidades = sum(int(i.get("unidades_base_total", 0) or 0) for i in carrito.values())
+    total_usd = sum(float(i.get("precio_total", 0) or 0) for i in carrito.values())
+    return len(carrito), total_unidades, total_usd
 
 def hash_password(password: str) -> str:
     salt = secrets.token_hex(16)
@@ -1312,16 +1342,39 @@ def formato_cantidad_pdf_simple(item):
 # PDF
 # -----------------------------
 def pdf_clean(text):
+    """
+    Limpia texto para FPDF clásico, que trabaja con Latin-1.
+    Evita errores en Railway/Python 3.13 al generar PDF con caracteres especiales.
+    """
+    import unicodedata
     text = str(text or "")
     repl = {
-        "á":"a","é":"e","í":"i","ó":"o","ú":"u","ñ":"n",
-        "Á":"A","É":"E","Í":"I","Ó":"O","Ú":"U","Ñ":"N",
+        "á":"a","é":"e","í":"i","ó":"o","ú":"u","ü":"u","ñ":"n",
+        "Á":"A","É":"E","Í":"I","Ó":"O","Ú":"U","Ü":"U","Ñ":"N",
         "–":"-","—":"-","“":"\"","”":"\"","’":"'",
-        "📦":"","💵":"","🧱":"","✅":"","❌":"","🔎":"","🛒":""
+        "•":"-","→":"->","×":"x","º":"o","ª":"a",
+        "📦":"","💵":"","🧱":"","✅":"","❌":"","🔎":"","🛒":"",
+        "📄":"","🧾":"","💳":"","📈":"","📊":"","⚙️":"","💾":"",
+        "🗂️":"","👥":"","🛍️":"","👤":"","📢":"","💰":"","🌐":"",
+        "📸":"","📍":"","💬":"","⚠️":"","🟡":""
     }
-    for a,b in repl.items():
-        text = text.replace(a,b)
-    return text
+    for a, b in repl.items():
+        text = text.replace(a, b)
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    return text.encode("latin-1", "replace").decode("latin-1")
+
+def pdf_force_latin1(pdf):
+    """
+    FPDF 1.x codifica páginas completas en latin1 al cerrar.
+    Esta limpieza final evita que cualquier carácter no Latin-1 sobreviviente rompa pdf.output().
+    """
+    try:
+        for n in list(pdf.pages.keys()):
+            pdf.pages[n] = pdf.pages[n].encode("latin-1", "replace").decode("latin-1")
+    except Exception:
+        pass
+    return pdf
 
 def generar_pdf_cotizacion(cot_id):
     rows = q("SELECT * FROM cotizaciones WHERE id=?", (cot_id,), fetch=True)
@@ -1405,6 +1458,7 @@ def generar_pdf_cotizacion(cot_id):
     pdf.ln(5)
     pdf.set_font("Arial", "I", 8)
     pdf.multi_cell(190, 5, pdf_clean("Cotizacion sujeta a disponibilidad al momento de confirmar el pedido. Precios y tasa sujetos a cambio luego del vencimiento."))
+    pdf_force_latin1(pdf)
     out = pdf.output(dest="S")
     if isinstance(out, str):
         return out.encode("latin-1", "replace")
@@ -1471,6 +1525,7 @@ def generar_pdf_pedido(pedido_id):
     if ped["notas"]:
         pdf.ln(3)
         pdf.multi_cell(190, 5, pdf_clean(f"Notas: {ped['notas']}"))
+    pdf_force_latin1(pdf)
     out = pdf.output(dest="S")
     if isinstance(out, str):
         return out.encode("latin-1", "replace")
@@ -1520,6 +1575,7 @@ def generar_pdf_estado_cuenta(username):
     else:
         for _, ab in abonos.iterrows():
             pdf.cell(190, 6, pdf_clean(f"#{int(ab['id'])} Credito #{int(ab['credito_id'])} | {ab['fecha']} | {money_usd(ab['monto_usd'])} | {ab['metodo']} | {ab['status']}"), ln=1)
+    pdf_force_latin1(pdf)
     out = pdf.output(dest="S")
     if isinstance(out, str):
         return out.encode("latin-1", "replace")
@@ -1624,7 +1680,7 @@ def admin_categorias():
             try:
                 q("INSERT INTO categorias (nombre, descripcion, activa, orden, creado_en) VALUES (?,?,?,?,?)",
                   (nombre.strip(), descripcion, 1, int(orden), now()))
-                st.success("Categoría creada.")
+                set_feedback(f"Categoría creada correctamente: {nombre.strip()}.", "success")
                 st.rerun()
             except Exception as e:
                 st.error(f"No se pudo crear: {e}")
@@ -1775,6 +1831,7 @@ def admin_productos():
                    link_instagram, link_mercadolibre, link_marketplace, notas_publicacion,
                    now(), now()))
                 st.success("Producto guardado.")
+                set_feedback(f"Producto guardado correctamente: {sku_e.strip()}.", "success")
                 try:
                     ok, msg = sync_producto_wc(sku_e.strip())
                     if ok:
@@ -1935,7 +1992,7 @@ def admin_usuarios():
                          credito_habilitado=excluded.credito_habilitado, ml_envio=excluded.ml_envio,
                          limite_credito_usd=excluded.limite_credito_usd, dias_credito=excluded.dias_credito""",
                       (username.strip(), hash_password(password or "1234"), nombre, rol, telefono, rif, ciudad, direccion, 1 if activo else 0, "proveedor", 1 if credito_hab else 0, 1 if ml_envio else 0, limite, int(dias), now()))
-                st.success("Usuario guardado.")
+                set_feedback(f"Usuario guardado correctamente: {nombre} ({username.strip()}).", "success")
                 st.rerun()
 
 
@@ -2972,7 +3029,12 @@ def render_card_producto(prod, user):
             "imagen_url": prod["wc_imagen_url"],
         }
         guardar_carrito(user["username"], carrito)
-        st.success("Agregado al carrito.")
+        n_items, n_unidades, total_carrito = carrito_resumen_texto(user["username"])
+        set_feedback(
+            f"Agregado al carrito: {prod['descripcion']} · {unidades_base_total} unidad(es). "
+            f"Carrito: {n_items} línea(s), {n_unidades} unidad(es), {money_usd(total_carrito)}.",
+            "success"
+        )
         st.rerun()
 
     st.markdown("</div>", unsafe_allow_html=True)
@@ -3003,7 +3065,8 @@ def tienda():
         st.markdown(
             f"""
             <div style="font-size:.78rem;color:#6b7280;">Carrito</div>
-            <div style="font-size:1.05rem;font-weight:900;">{len(carrito)} item(s)</div>
+            <div style="font-size:1.05rem;font-weight:900;">{len(carrito)} línea(s)</div>
+            <div style="font-size:.78rem;color:#64748b;">{t['unidades_total']} unidad(es)</div>
             <div style="font-size:.82rem;color:#047857;font-weight:800;">{money_usd(t['subtotal'])}</div>
             """,
             unsafe_allow_html=True
@@ -3083,11 +3146,15 @@ def carrito_view():
                 nueva = max(1, int(item.get("cantidad_presentacion", 1)) - 1)
                 carrito[key] = recalcular_item_carrito(item, nueva)
                 guardar_carrito(user["username"], carrito)
+                n_items, n_unidades, total_carrito = carrito_resumen_texto(user["username"])
+                set_feedback(f"Cantidad actualizada. Carrito: {n_items} línea(s), {n_unidades} unidad(es), {money_usd(total_carrito)}.", "success")
                 st.rerun()
             nueva_q = bqty.number_input("Cantidad", min_value=1, max_value=99999, value=int(item.get("cantidad_presentacion", 1)), key=f"qty_{key}", label_visibility="collapsed")
             if int(nueva_q) != int(item.get("cantidad_presentacion", 1)):
                 carrito[key] = recalcular_item_carrito(item, int(nueva_q))
                 guardar_carrito(user["username"], carrito)
+                n_items, n_unidades, total_carrito = carrito_resumen_texto(user["username"])
+                set_feedback(f"Cantidad actualizada. Carrito: {n_items} línea(s), {n_unidades} unidad(es), {money_usd(total_carrito)}.", "success")
                 st.rerun()
             if bmas.button("+", key=f"plus_{key}", use_container_width=True):
                 nueva = int(item.get("cantidad_presentacion", 1)) + 1
@@ -3100,6 +3167,8 @@ def carrito_view():
         if c4.button("🗑️", key=f"del_{key}"):
             carrito.pop(key, None)
             guardar_carrito(user["username"], carrito)
+            n_items, n_unidades, total_carrito = carrito_resumen_texto(user["username"])
+            set_feedback(f"Item eliminado. Carrito: {n_items} línea(s), {n_unidades} unidad(es), {money_usd(total_carrito)}.", "warning")
             st.rerun()
         st.markdown("---")
 
@@ -3126,6 +3195,7 @@ def carrito_view():
     c1, c2 = st.columns(2)
     if c1.button("🧹 Vaciar carrito", use_container_width=True):
         limpiar_carrito(user["username"])
+        set_feedback("Carrito vaciado correctamente.", "warning")
         st.rerun()
 
     st.markdown("---")
@@ -3248,6 +3318,8 @@ if user is None:
     login_screen()
     st.stop()
 
+show_feedback()
+
 with st.sidebar:
     st.title("📦 Insumos Mayor")
     st.write(f"**{user['nombre']}**")
@@ -3270,6 +3342,11 @@ with st.sidebar:
     st.session_state.menu = menu
 
     st.markdown("---")
+    try:
+        _ci, _cu, _ct = carrito_resumen_texto(user["username"])
+        st.caption(f"🛒 Carrito: {_ci} línea(s) · {_cu} unidad(es) · {money_usd(_ct)}")
+    except Exception:
+        pass
     if st.button("Cerrar sesión", use_container_width=True):
         logout()
 
