@@ -40,7 +40,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V2 Fix35 Foto Limpia"
+APP_NAME = "Sistema de Insumos al Mayor V2 Fix36 Gestión Comercial"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -951,6 +951,80 @@ def pendientes_publicacion(prod):
     if not int(prod["pub_whatsapp"] or 0): pend.append("WhatsApp")
     if not int(prod["pub_web"] or 0): pend.append("Web")
     return pend
+
+def pedido_items_rows(pedido_row):
+    """Convierte el JSON de items de pedido/cotización en filas legibles."""
+    rows = []
+    try:
+        items = json.loads(pedido_row["items"] or "{}")
+    except Exception:
+        items = {}
+    for _, it in items.items():
+        rows.append({
+            "SKU": it.get("sku", ""),
+            "Producto": it.get("desc", ""),
+            "Presentación": it.get("presentacion", ""),
+            "Cantidad": int(it.get("cantidad_presentacion", 0) or 0),
+            "Unidades": int(it.get("unidades_base_total", 0) or 0),
+            "Subtotal USD": float(it.get("precio_total", 0) or 0),
+        })
+    return rows
+
+def productos_mas_comprados_por_usuario(username):
+    pedidos = q("SELECT * FROM pedidos WHERE username=? AND status NOT IN ('Cancelado','Anulado')", (username,), fetch=True)
+    acum = {}
+    for p in pedidos:
+        for it in pedido_items_rows(p):
+            sku = it["SKU"]
+            if not sku:
+                continue
+            if sku not in acum:
+                acum[sku] = {"SKU": sku, "Producto": it["Producto"], "Unidades": 0, "Total USD": 0.0, "Veces": 0}
+            acum[sku]["Unidades"] += int(it["Unidades"] or 0)
+            acum[sku]["Total USD"] += float(it["Subtotal USD"] or 0)
+            acum[sku]["Veces"] += 1
+    return sorted(acum.values(), key=lambda x: x["Total USD"], reverse=True)
+
+def productos_alertas_margen():
+    rows = q("""SELECT p.*, c.nombre AS categoria
+                FROM productos p LEFT JOIN categorias c ON p.categoria_id=c.id
+                WHERE p.activo=1
+                ORDER BY c.nombre, p.descripcion""", fetch=True)
+    data = []
+    for p in rows:
+        m = calc_costos_margen(p)
+        minimo = float(p["margen_minimo_pct"] or 25)
+        problemas = []
+        if float(p["costo_proveedor_unitario"] or 0) <= 0:
+            problemas.append("Sin costo proveedor")
+        if int(p["maneja_docena"] or 0) and float(p["precio_docena"] or 0) <= 0:
+            problemas.append("Sin precio docena")
+        if int(p["maneja_bulto"] or 0) and float(p["precio_bulto"] or 0) <= 0:
+            problemas.append("Sin precio bulto")
+        if m["unidad"]["margen_pct"] < minimo and float(p["precio_unidad"] or 0) > 0:
+            problemas.append("Margen unidad bajo")
+        if int(p["maneja_docena"] or 0) and m["docena"]["margen_pct"] < minimo and float(p["precio_docena"] or 0) > 0:
+            problemas.append("Margen docena bajo")
+        if int(p["maneja_bulto"] or 0) and m["bulto"]["margen_pct"] < minimo and float(p["precio_bulto"] or 0) > 0:
+            problemas.append("Margen bulto bajo")
+        if not p["wc_imagen_url"]:
+            problemas.append("Sin foto")
+        if int(p["wc_stock"] or 0) <= 0:
+            problemas.append("Sin stock web")
+
+        if problemas:
+            data.append({
+                "Categoría": p["categoria"] or "Sin categoría",
+                "SKU": p["sku"],
+                "Producto": p["descripcion"],
+                "Costo real c/u": round(m["costo_real_unitario"], 2),
+                "Unidad %": round(m["unidad"]["margen_pct"], 1),
+                "Docena %": round(m["docena"]["margen_pct"], 1),
+                "Bulto %": round(m["bulto"]["margen_pct"], 1),
+                "Mínimo %": minimo,
+                "Alertas": ", ".join(problemas),
+            })
+    return data
 
 # -----------------------------
 # WOO
@@ -2179,13 +2253,17 @@ def admin_usuarios():
             total_pagado_final = float(ped[ped["status"].astype(str).str.contains("Finalizado|Pagado|Procesado|Confirmado", case=False, na=False)]["total_usd"].sum()) if not ped.empty else 0.0
             saldo_credito = float(cre["saldo_usd"].sum()) if not cre.empty else 0.0
 
-            k1, k2, k3, k4 = st.columns(4)
+            ultima_compra = ped["fecha"].max() if not ped.empty else "Sin compras"
+            promedio_compra = total_gastado / len(ped) if len(ped) else 0.0
+            k1, k2, k3, k4, k5 = st.columns(5)
             k1.metric("Pedidos", len(ped))
             k2.metric("Total pedidos", money_usd(total_gastado))
             k3.metric("Compras finalizadas", money_usd(total_pagado_final))
             k4.metric("Saldo crédito", money_usd(saldo_credito))
+            k5.metric("Promedio compra", money_usd(promedio_compra))
+            st.caption(f"Última compra / pedido: {ultima_compra}")
 
-            sub1, sub2, sub3 = st.tabs(["Pedidos", "Cotizaciones", "Créditos"])
+            sub1, sub2, sub3, sub4 = st.tabs(["Pedidos", "Cotizaciones", "Créditos", "Productos frecuentes"])
             with sub1:
                 if ped.empty:
                     st.info("Sin pedidos.")
@@ -2201,6 +2279,13 @@ def admin_usuarios():
                     st.info("Sin créditos.")
                 else:
                     st.dataframe(cre[["id","pedido_id","fecha_inicio","fecha_vencimiento","monto_usd","saldo_usd","status"]], use_container_width=True, hide_index=True)
+            with sub4:
+                frecuentes = productos_mas_comprados_por_usuario(username_exam)
+                if not frecuentes:
+                    st.info("Sin productos frecuentes todavía.")
+                else:
+                    st.dataframe(pd.DataFrame(frecuentes).head(20), use_container_width=True, hide_index=True,
+                                 column_config={"Total USD": st.column_config.NumberColumn(format="$%.2f")})
 
         st.subheader("Acciones administrativas")
         usuarios = q("SELECT username,nombre FROM usuarios ORDER BY nombre", fetch=True)
@@ -2310,6 +2395,22 @@ def admin_cotizaciones():
             st.download_button("⬇️ Descargar cotización PDF", data=pdf, file_name=f"cotizacion_{int(cot_id):04d}.pdf", mime="application/pdf", use_container_width=True)
         else:
             st.error("Cotización no encontrada.")
+
+    rows_status = q("SELECT status FROM cotizaciones WHERE id=?", (int(cot_id),), fetch=True)
+    estado_actual_cot = rows_status[0]["status"] if rows_status else "Pendiente"
+    estados_cot = ["Pendiente", "Enviada", "Aprobada", "Rechazada", "Convertida en pedido"]
+    c_estado1, c_estado2 = st.columns([1.2, 1])
+    nuevo_estado_cot = c_estado1.selectbox(
+        "Estado de cotización",
+        estados_cot,
+        index=estados_cot.index(estado_actual_cot) if estado_actual_cot in estados_cot else 0,
+        key=f"estado_cot_{cot_id}"
+    )
+    if c_estado2.button("💾 Guardar estado cotización", use_container_width=True):
+        q("UPDATE cotizaciones SET status=? WHERE id=?", (nuevo_estado_cot, int(cot_id)))
+        st.success("Estado de cotización actualizado.")
+        st.rerun()
+
     c3, c4 = st.columns(2)
     tipo_convertir = c3.radio("Convertir como", ["Contado", "Crédito"], horizontal=True, key=f"tipo_convertir_cot_{cot_id}")
     if c4.button("➡️ Convertir cotización en pedido", use_container_width=True):
@@ -2334,25 +2435,95 @@ def admin_cotizaciones():
 
 
 def dashboard_admin():
-    st.title("📊 Dashboard")
+    st.title("📊 Dashboard Comercial")
+
     pedidos = pd.read_sql_query("SELECT * FROM pedidos", get_conn())
     creditos = pd.read_sql_query("SELECT * FROM creditos", get_conn())
     abonos = pd.read_sql_query("SELECT * FROM abonos", get_conn())
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Pedidos", len(pedidos))
-    c2.metric("Ventas/Pedidos USD", money_usd(pedidos["total_usd"].sum() if not pedidos.empty else 0))
-    saldo = creditos["saldo_usd"].sum() if not creditos.empty else 0
-    c3.metric("Saldo créditos", money_usd(saldo))
+    productos = pd.read_sql_query("SELECT * FROM productos", get_conn())
+
+    pedidos_activos = pedidos[~pedidos["status"].astype(str).str.lower().isin(["cancelado", "anulado"])] if not pedidos.empty else pedidos
+    total_pedidos = float(pedidos_activos["total_usd"].sum()) if not pedidos_activos.empty else 0.0
+    saldo = float(creditos["saldo_usd"].sum()) if not creditos.empty else 0.0
     pend = len(abonos[abonos["status"]=="Pendiente de validar"]) if not abonos.empty else 0
+    cot_pend = pd.read_sql_query("SELECT COUNT(*) AS n FROM cotizaciones WHERE status IN ('Pendiente','Enviada','Aprobada')", get_conn()).iloc[0]["n"]
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Pedidos activos", len(pedidos_activos))
+    c2.metric("Ventas/Pedidos USD", money_usd(total_pedidos))
+    c3.metric("Saldo créditos", money_usd(saldo))
     c4.metric("Pagos por validar", pend)
-    st.subheader("Últimos pedidos")
-    if pedidos.empty:
-        st.info("Sin pedidos.")
-    else:
-        st.dataframe(pedidos[["id","fecha","cliente_nombre","tipo_pago","total_usd","status"]].sort_values("id", ascending=False).head(12), use_container_width=True, hide_index=True)
+    c5.metric("Cotizaciones abiertas", int(cot_pend or 0))
+
+    tab1, tab2, tab3, tab4 = st.tabs(["Últimos pedidos", "Mejores clientes", "Productos/Categorías", "Alertas comerciales"])
+
+    with tab1:
+        if pedidos.empty:
+            st.info("Sin pedidos.")
+        else:
+            cols = ["id","fecha","cliente_nombre","tipo_pago","metodo_pago","total_usd","status","pos_procesado"]
+            st.dataframe(pedidos[cols].sort_values("id", ascending=False).head(25), use_container_width=True, hide_index=True)
+
+    with tab2:
+        if pedidos_activos.empty:
+            st.info("Sin ventas activas.")
+        else:
+            mejores = pedidos_activos.groupby(["username","cliente_nombre"], dropna=False).agg(
+                pedidos=("id","count"),
+                total_usd=("total_usd","sum"),
+                ultima_compra=("fecha","max")
+            ).reset_index().sort_values("total_usd", ascending=False)
+            st.dataframe(mejores.head(30), use_container_width=True, hide_index=True,
+                         column_config={"total_usd": st.column_config.NumberColumn(format="$%.2f")})
+
+    with tab3:
+        items = []
+        if not pedidos_activos.empty:
+            for _, p in pedidos_activos.iterrows():
+                for it in pedido_items_rows(p):
+                    items.append(it)
+        if not items:
+            st.info("Aún no hay productos vendidos para analizar.")
+        else:
+            df_items = pd.DataFrame(items)
+            prod_top = df_items.groupby(["SKU","Producto"], dropna=False).agg(
+                unidades=("Unidades","sum"),
+                total_usd=("Subtotal USD","sum"),
+                lineas=("SKU","count")
+            ).reset_index().sort_values("total_usd", ascending=False)
+            st.subheader("Productos más vendidos")
+            st.dataframe(prod_top.head(30), use_container_width=True, hide_index=True,
+                         column_config={"total_usd": st.column_config.NumberColumn(format="$%.2f")})
+
+            if not productos.empty:
+                cat_map = productos[["sku","categoria_id"]].copy()
+                cats = pd.read_sql_query("SELECT id,nombre FROM categorias", get_conn())
+                cat_map = cat_map.merge(cats, left_on="categoria_id", right_on="id", how="left")
+                df_cat = df_items.merge(cat_map, left_on="SKU", right_on="sku", how="left")
+                cat_top = df_cat.groupby("nombre", dropna=False).agg(
+                    unidades=("Unidades","sum"),
+                    total_usd=("Subtotal USD","sum"),
+                    lineas=("SKU","count")
+                ).reset_index().rename(columns={"nombre":"Categoría"}).sort_values("total_usd", ascending=False)
+                st.subheader("Categorías más vendidas")
+                st.dataframe(cat_top, use_container_width=True, hide_index=True,
+                             column_config={"total_usd": st.column_config.NumberColumn(format="$%.2f")})
+
+    with tab4:
+        alertas = productos_alertas_margen()
+        if not alertas:
+            st.success("No hay alertas comerciales relevantes.")
+        else:
+            df_alertas = pd.DataFrame(alertas)
+            a1, a2, a3 = st.columns(3)
+            a1.metric("Productos con alerta", len(df_alertas))
+            a2.metric("Sin costo proveedor", int(df_alertas["Alertas"].str.contains("Sin costo proveedor").sum()))
+            a3.metric("Margen bajo", int(df_alertas["Alertas"].str.contains("Margen").sum()))
+            st.dataframe(df_alertas, use_container_width=True, hide_index=True)
+
 
 def mis_pedidos():
-    st.title("🧾 Mis pedidos")
+    st.title("🧾 Pedidos / Gestor de órdenes")
     user = get_user(st.session_state.user["username"])
     visibles = usuarios_visibles_para(user)
     placeholders = ",".join(["?"]*len(visibles))
@@ -2361,46 +2532,110 @@ def mis_pedidos():
         st.info("Sin pedidos.")
         return
 
-    estados = ["Pendiente", "Pendiente de pago/entrega", "Crédito pendiente", "Crédito parcial", "Pago por validar", "Confirmado", "Preparando", "Listo para entregar", "Entregado", "Finalizado", "Anulado"]
+    bus = st.text_input("Buscar pedido", placeholder="Cliente, número, fecha, estado, monto...")
+    estados_filtro = ["Todos"] + sorted([x for x in df["status"].dropna().astype(str).unique().tolist()])
+    colf1, colf2, colf3 = st.columns([2, 1.3, 1.3])
+    with colf1:
+        filtro_estado = st.selectbox("Estado", estados_filtro)
+    with colf2:
+        solo_credito = st.checkbox("Solo créditos")
+    with colf3:
+        solo_pos_pendiente = st.checkbox("Pendiente POS")
 
-    for _, p in df.iterrows():
-        pid = int(p["id"])
-        with st.expander(f"Pedido #{pid} | {p['cliente_nombre']} | {p['fecha']} | {money_usd(p['total_usd'])} | {p['status']}"):
-            ctop1, ctop2, ctop3 = st.columns(3)
-            ctop1.write(f"Cliente: **{p['cliente_nombre']}**")
-            ctop2.write(f"Tipo: **{p['tipo_pago']}**")
-            ctop3.write(f"Método: **{p['metodo_pago'] or 'N/A'}**")
-            st.write(f"Total: **{money_usd(p['total_usd'])}** · {money_bs(float(p['total_bs_proveedor'] or 0))}")
+    df_view = df.copy()
+    if bus:
+        b = bus.lower().replace("#", "")
+        mask = (
+            df_view["id"].astype(str).str.contains(b, na=False) |
+            df_view["fecha"].astype(str).str.lower().str.contains(b, na=False) |
+            df_view["cliente_nombre"].astype(str).str.lower().str.contains(b, na=False) |
+            df_view["status"].astype(str).str.lower().str.contains(b, na=False) |
+            df_view["total_usd"].astype(str).str.contains(b, na=False)
+        )
+        df_view = df_view[mask]
+    if filtro_estado != "Todos":
+        df_view = df_view[df_view["status"].astype(str) == filtro_estado]
+    if solo_credito:
+        df_view = df_view[df_view["tipo_pago"].astype(str).str.lower() == "credito"]
+    if solo_pos_pendiente and "pos_procesado" in df_view.columns:
+        df_view = df_view[df_view["pos_procesado"].fillna(0).astype(int) == 0]
 
-            if user["rol"] == "admin":
-                idx = estados.index(p["status"]) if p["status"] in estados else 0
-                nuevo = st.selectbox("Estado del pedido", estados, index=idx, key=f"estado_pedido_{pid}")
-                if nuevo != p["status"]:
-                    if nuevo == "Cancelado":
-                        ok, msg = anular_credito_de_pedido(pid, "Pedido cambiado a Cancelado por admin")
-                        st.success(msg) if ok else st.error(msg)
-                    elif nuevo == "Finalizado / Pagado" and p["credito_id"]:
-                        ok, msg = marcar_credito_pagado(int(p["credito_id"]), st.session_state.user["username"])
-                        st.success(msg) if ok else st.error(msg)
-                    else:
-                        q("UPDATE pedidos SET status=? WHERE id=?", (nuevo, pid))
-                        st.success("Estado actualizado.")
-                    st.rerun()
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Pedidos filtrados", len(df_view))
+    k2.metric("Total filtrado", money_usd(df_view["total_usd"].sum() if not df_view.empty else 0))
+    k3.metric("Créditos", int((df_view["tipo_pago"].astype(str).str.lower()=="credito").sum()) if not df_view.empty else 0)
+    k4.metric("Pendiente POS", int((df_view["pos_procesado"].fillna(0).astype(int)==0).sum()) if "pos_procesado" in df_view.columns and not df_view.empty else 0)
 
-            c1, c2 = st.columns(2)
-            if c1.button("📄 Descargar PDF", key=f"pdf_pedido_{pid}", use_container_width=True):
-                pdf = generar_pdf_pedido(pid)
-                st.download_button("⬇️ Descargar", data=pdf, file_name=f"pedido_{pid:04d}.pdf", mime="application/pdf", use_container_width=True, key=f"down_pedido_{pid}")
+    resumen_cols = ["id","fecha","cliente_nombre","tipo_pago","total_usd","status"]
+    if "pos_procesado" in df_view.columns:
+        resumen_cols.append("pos_procesado")
+    st.dataframe(df_view[resumen_cols], use_container_width=True, hide_index=True,
+                 column_config={"total_usd": st.column_config.NumberColumn(format="$%.2f")})
 
-            if user["rol"] == "admin":
-                confirmar = st.checkbox("Confirmar eliminación de este pedido", key=f"confirm_del_pedido_{pid}")
-                if c2.button("🗑️ Eliminar pedido", key=f"del_pedido_{pid}", disabled=not confirmar, use_container_width=True):
-                    ok, msg = eliminar_pedido_seguro(pid)
+    st.markdown("---")
+    if df_view.empty:
+        st.info("No hay pedidos que coincidan con los filtros.")
+        return
+
+    pid = st.selectbox("Examinar pedido", df_view["id"].astype(int).tolist(), format_func=lambda x: f"Pedido #{x}")
+    rows = q("SELECT * FROM pedidos WHERE id=?", (int(pid),), fetch=True)
+    if not rows:
+        st.error("Pedido no encontrado.")
+        return
+    p = rows[0]
+
+    ctop1, ctop2, ctop3, ctop4 = st.columns(4)
+    ctop1.metric("Total", money_usd(p["total_usd"]))
+    ctop2.metric("Tipo", str(p["tipo_pago"]).upper())
+    ctop3.metric("Estado", p["status"])
+    ctop4.metric("POS", "Procesado" if int(p["pos_procesado"] or 0) else "Pendiente")
+
+    st.write(f"Cliente: **{p['cliente_nombre']}** · Fecha: **{p['fecha']}** · Método: **{p['metodo_pago'] or 'N/A'}**")
+    if p["notas"]:
+        st.info(p["notas"])
+
+    items_df = pd.DataFrame(pedido_items_rows(p))
+    if not items_df.empty:
+        st.subheader("Items del pedido")
+        st.dataframe(items_df, use_container_width=True, hide_index=True,
+                     column_config={"Subtotal USD": st.column_config.NumberColumn(format="$%.2f")})
+
+    estados = ["Pendiente", "Pendiente de pago/entrega", "Crédito pendiente", "Crédito parcial", "Pago por validar",
+               "Confirmado", "Preparando", "Listo para entregar", "Entregado", "Finalizado / Pagado",
+               "Procesado en POS", "Cancelado", "Anulado"]
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        pdf = generar_pdf_pedido(int(pid))
+        st.download_button("📄 Descargar PDF", data=pdf, file_name=f"pedido_{int(pid):04d}.pdf", mime="application/pdf", use_container_width=True)
+
+    if user["rol"] == "admin":
+        with c2:
+            idx = estados.index(p["status"]) if p["status"] in estados else 0
+            nuevo = st.selectbox("Cambiar estado", estados, index=idx, key=f"estado_pedido_manager_{pid}")
+            if st.button("Guardar estado", use_container_width=True, key=f"save_estado_ped_{pid}"):
+                if nuevo in ["Cancelado", "Anulado"]:
+                    ok, msg = anular_credito_de_pedido(int(pid), f"Pedido cambiado a {nuevo} por admin")
                     if ok:
-                        st.success(msg)
-                        st.rerun()
-                    else:
-                        st.error(msg)
+                        q("UPDATE pedidos SET status=? WHERE id=?", (nuevo, int(pid)))
+                    st.success(msg) if ok else st.error(msg)
+                elif nuevo == "Finalizado / Pagado" and p["credito_id"]:
+                    ok, msg = marcar_credito_pagado(int(p["credito_id"]), st.session_state.user["username"])
+                    st.success(msg) if ok else st.error(msg)
+                else:
+                    q("UPDATE pedidos SET status=? WHERE id=?", (nuevo, int(pid)))
+                    st.success("Estado actualizado.")
+                st.rerun()
+
+        with c3:
+            confirmar = st.checkbox("Confirmar eliminación", key=f"confirm_del_pedido_{pid}")
+            if st.button("🗑️ Eliminar pedido", key=f"del_pedido_{pid}", disabled=not confirmar, use_container_width=True):
+                ok, msg = eliminar_pedido_seguro(int(pid))
+                if ok:
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
 
 
 def mis_creditos():
@@ -2521,7 +2756,7 @@ def validar_creditos():
 def reportes():
     st.title("📈 Reportes")
 
-    tab1, tab2, tab3 = st.tabs(["Resumen general", "Valor de inventario", "Exportar Excel"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Resumen general", "Valor de inventario", "Alertas comerciales", "Exportar Excel"])
 
     pedidos = pd.read_sql_query("SELECT * FROM pedidos ORDER BY id DESC", get_conn())
     creditos = pd.read_sql_query("SELECT * FROM creditos ORDER BY id DESC", get_conn())
@@ -2656,6 +2891,36 @@ def reportes():
         )
 
     with tab3:
+        st.subheader("Alertas comerciales de productos")
+        alertas = productos_alertas_margen()
+        if not alertas:
+            st.success("No hay alertas comerciales relevantes.")
+        else:
+            df_alertas = pd.DataFrame(alertas)
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Productos con alerta", len(df_alertas))
+            c2.metric("Sin costo proveedor", int(df_alertas["Alertas"].str.contains("Sin costo proveedor").sum()))
+            c3.metric("Margen bajo", int(df_alertas["Alertas"].str.contains("Margen").sum()))
+            filtro_alerta = st.text_input("Buscar alerta", placeholder="SKU, producto, categoría o tipo de alerta")
+            df_show = df_alertas
+            if filtro_alerta:
+                b = filtro_alerta.lower()
+                df_show = df_alertas[
+                    df_alertas["SKU"].astype(str).str.lower().str.contains(b) |
+                    df_alertas["Producto"].astype(str).str.lower().str.contains(b) |
+                    df_alertas["Categoría"].astype(str).str.lower().str.contains(b) |
+                    df_alertas["Alertas"].astype(str).str.lower().str.contains(b)
+                ]
+            st.dataframe(df_show, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Descargar alertas CSV",
+                data=df_alertas.to_csv(index=False).encode("utf-8-sig"),
+                file_name="alertas_comerciales_productos.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+    with tab4:
         st.subheader("Exportar reporte completo")
         rows = q("""SELECT p.*, c.nombre AS categoria
                     FROM productos p LEFT JOIN categorias c ON p.categoria_id=c.id
