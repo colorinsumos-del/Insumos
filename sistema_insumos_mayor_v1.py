@@ -40,7 +40,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V2 Fix30 UI Catálogo"
+APP_NAME = "Sistema de Insumos al Mayor V2 Fix31 UI Catálogo Fix"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -3241,7 +3241,10 @@ def render_card_producto(prod, user):
     stock = int(prod["wc_stock"] or 0)
     disp = disponibilidad(prod)
     img = prod["wc_imagen_url"]
-    categoria_txt = prod.get("categoria") or categoria_nombre(prod["categoria_id"])
+    try:
+        categoria_txt = prod["categoria"] if "categoria" in prod.keys() and prod["categoria"] else categoria_nombre(prod["categoria_id"])
+    except Exception:
+        categoria_txt = categoria_nombre(prod["categoria_id"])
 
     st.markdown('<div class="product-card">', unsafe_allow_html=True)
 
