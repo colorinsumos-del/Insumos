@@ -40,7 +40,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V2 Fix25 Carrito por Item"
+APP_NAME = "Sistema de Insumos al Mayor V2 Fix26 Catálogo Banners"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -254,6 +254,37 @@ div[data-testid="stForm"] {
     text-overflow: ellipsis;
 }
 
+
+/* Banner compacto de categoría en tienda */
+.category-banner {
+    border: 1px solid #dbeafe;
+    border-radius: 18px;
+    background: linear-gradient(135deg, #eff6ff 0%, #ffffff 65%);
+    padding: 14px 16px;
+    margin: 8px 0 14px 0;
+    box-shadow: 0 2px 10px rgba(37, 99, 235, 0.06);
+}
+.category-banner-title {
+    font-size: 1.15rem;
+    font-weight: 900;
+    color: #1e293b;
+}
+.category-banner-sub {
+    color: #64748b;
+    font-size: .88rem;
+    font-weight: 600;
+}
+.category-banner-pill {
+    display: inline-block;
+    margin-top: 8px;
+    background: #dbeafe;
+    color: #1d4ed8;
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: .78rem;
+    font-weight: 900;
+}
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -452,6 +483,44 @@ def show_cart_bubble(username: str):
         """,
         unsafe_allow_html=True
     )
+
+def set_categoria_tienda(cat_name: str):
+    st.session_state["tienda_categoria"] = cat_name
+
+def categoria_portada(cat_sel: str):
+    if cat_sel == "Todas":
+        row = q("""SELECT p.*, c.nombre AS categoria
+                   FROM productos p LEFT JOIN categorias c ON p.categoria_id=c.id
+                   WHERE p.activo=1 AND COALESCE(p.wc_imagen_url,'')!=''
+                   ORDER BY p.wc_stock DESC, p.descripcion LIMIT 1""", fetch=True)
+    else:
+        row = q("""SELECT p.*, c.nombre AS categoria
+                   FROM productos p LEFT JOIN categorias c ON p.categoria_id=c.id
+                   WHERE p.activo=1 AND c.nombre=? AND COALESCE(p.wc_imagen_url,'')!=''
+                   ORDER BY p.wc_stock DESC, p.descripcion LIMIT 1""", (cat_sel,), fetch=True)
+    return row[0] if row else None
+
+def show_categoria_banner(cat_sel: str, total_productos: int):
+    portada = categoria_portada(cat_sel)
+    title = "Todas las categorías" if cat_sel == "Todas" else cat_sel
+    sub = f"{total_productos} producto(s) disponibles en esta selección"
+    col_img, col_txt = st.columns([0.8, 3.2])
+    with col_img:
+        if portada and portada["wc_imagen_url"]:
+            st.image(portada["wc_imagen_url"], width=110)
+        else:
+            st.markdown("<div style='height:100px;border-radius:16px;background:#f3f4f6;display:flex;align-items:center;justify-content:center;font-size:34px'>📦</div>", unsafe_allow_html=True)
+    with col_txt:
+        st.markdown(
+            f"""
+            <div class="category-banner">
+                <div class="category-banner-title">{title}</div>
+                <div class="category-banner-sub">{sub}</div>
+                <span class="category-banner-pill">Catálogo COLOR INSUMOS</span>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 
 def hash_password(password: str) -> str:
     salt = secrets.token_hex(16)
@@ -3187,12 +3256,6 @@ def render_card_producto(prod, user):
     else:
         cantidad = 1
         c2.number_input("Cantidad", min_value=1, max_value=1, value=1, step=1, key=f"cant_locked_{prod['sku']}_{presentacion}", label_visibility="collapsed", disabled=True)
-        st.caption(f"{presentacion.capitalize()} bloqueado: se agrega 1 {presentacion}. Puedes aumentar o bajar en el carrito con + / -.")
-
-    st.markdown(
-        f"<div class='muted'>{resumen_presentacion_catalogo(prod, presentacion, int(cantidad))}</div>",
-        unsafe_allow_html=True
-    )
 
     precio_calc = calcular_precio_inteligente(prod, presentacion, int(cantidad))
     precio_pres = float(precio_calc["precio_presentacion"])
@@ -3263,12 +3326,22 @@ def tienda():
     cat_ids = {"Todas": None}
     cat_ids.update({c["nombre"]: c["id"] for c in cats})
 
+    if "tienda_categoria" not in st.session_state or st.session_state["tienda_categoria"] not in cat_names:
+        st.session_state["tienda_categoria"] = "Todas"
+
     # Encabezado compacto para ganar espacio horizontal.
     st.markdown('<div class="card">', unsafe_allow_html=True)
     top1, top2, top3, top4 = st.columns([2.2, 3.2, 1.3, 1.5])
 
     with top1:
-        cat_sel = st.selectbox("Categoría", cat_names, label_visibility="collapsed")
+        cat_sel = st.selectbox(
+            "Categoría",
+            cat_names,
+            index=cat_names.index(st.session_state["tienda_categoria"]),
+            key="tienda_categoria_select",
+            label_visibility="collapsed"
+        )
+        st.session_state["tienda_categoria"] = cat_sel
 
     with top2:
         bus = st.text_input("Buscar producto", placeholder="Buscar por nombre o SKU...", label_visibility="collapsed")
@@ -3298,6 +3371,19 @@ def tienda():
         params.extend([f"%{bus}%", f"%{bus}%"])
     sql += " ORDER BY c.orden, p.descripcion"
     rows = q(sql, params, fetch=True)
+
+    nav1, nav2, nav3 = st.columns([1, 2, 1])
+    current_idx = cat_names.index(cat_sel)
+    with nav1:
+        if st.button("⬅️ Categoría anterior", use_container_width=True, disabled=current_idx <= 0):
+            st.session_state["tienda_categoria"] = cat_names[current_idx - 1]
+            st.rerun()
+    with nav2:
+        show_categoria_banner(cat_sel, len(rows))
+    with nav3:
+        if st.button("Categoría siguiente ➡️", use_container_width=True, disabled=current_idx >= len(cat_names) - 1):
+            st.session_state["tienda_categoria"] = cat_names[current_idx + 1]
+            st.rerun()
 
     rinfo1, rinfo2 = st.columns([3, 1])
     rinfo1.caption(f"{len(rows)} productos encontrados")
@@ -3350,17 +3436,20 @@ def carrito_view():
 
         with c2:
             bmenos, bqty, bmas = st.columns([0.7,1.2,0.7])
+            qty_state_key = f"qty_{key}"
             if bmenos.button("−", key=f"minus_{key}", use_container_width=True):
                 nueva = max(1, int(item.get("cantidad_presentacion", 1)) - 1)
                 carrito[key] = recalcular_item_carrito(item, nueva)
                 guardar_carrito(user["username"], carrito)
+                st.session_state[qty_state_key] = nueva
                 n_items, n_unidades, total_carrito = carrito_resumen_texto(user["username"])
                 set_feedback(f"Cantidad actualizada. Carrito: {n_items} línea(s), {n_unidades} unidad(es), {money_usd(total_carrito)}.", "success")
                 st.rerun()
-            nueva_q = bqty.number_input("Cantidad", min_value=1, max_value=99999, value=int(item.get("cantidad_presentacion", 1)), key=f"qty_{key}", label_visibility="collapsed")
+            nueva_q = bqty.number_input("Cantidad", min_value=1, max_value=99999, value=int(item.get("cantidad_presentacion", 1)), key=qty_state_key, label_visibility="collapsed")
             if int(nueva_q) != int(item.get("cantidad_presentacion", 1)):
                 carrito[key] = recalcular_item_carrito(item, int(nueva_q))
                 guardar_carrito(user["username"], carrito)
+                st.session_state[qty_state_key] = int(nueva_q)
                 n_items, n_unidades, total_carrito = carrito_resumen_texto(user["username"])
                 set_feedback(f"Cantidad actualizada. Carrito: {n_items} línea(s), {n_unidades} unidad(es), {money_usd(total_carrito)}.", "success")
                 st.rerun()
@@ -3368,6 +3457,9 @@ def carrito_view():
                 nueva = int(item.get("cantidad_presentacion", 1)) + 1
                 carrito[key] = recalcular_item_carrito(item, nueva)
                 guardar_carrito(user["username"], carrito)
+                st.session_state[qty_state_key] = nueva
+                n_items, n_unidades, total_carrito = carrito_resumen_texto(user["username"])
+                set_feedback(f"Cantidad actualizada. Carrito: {n_items} línea(s), {n_unidades} unidad(es), {money_usd(total_carrito)}.", "success")
                 st.rerun()
 
         c3.write(f"**{money_usd(item['precio_total'])}**")
