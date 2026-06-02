@@ -40,7 +40,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V2 Fix31 UI Catálogo Fix"
+APP_NAME = "Sistema de Insumos al Mayor V2 Fix32 Catálogo Horizontal"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -255,133 +255,100 @@ div[data-testid="stForm"] {
 }
 
 
-
-/* ===== Rediseño visual Tienda / Catálogo ===== */
-.catalog-hero {
-    border: 1px solid #dbe4f0;
-    border-radius: 20px;
-    padding: 16px 18px;
-    margin-bottom: 14px;
-    background: linear-gradient(135deg, #f8fbff 0%, #ffffff 100%);
-    box-shadow: 0 2px 12px rgba(15, 23, 42, 0.04);
-}
-.catalog-hero-title {
-    font-size: 1.65rem;
-    font-weight: 900;
-    color: #172554;
-    line-height: 1.1;
-}
-.catalog-hero-sub {
-    margin-top: 4px;
-    color: #64748b;
-    font-size: .92rem;
-    font-weight: 600;
-}
-.toolbar-card {
-    border:1px solid #e2e8f0;
+/* ===== Catálogo horizontal ===== */
+.catalog-topbar {
+    border:1px solid #e5e7eb;
     border-radius:18px;
-    padding:14px;
-    background:#ffffff;
+    padding:16px;
+    background:linear-gradient(135deg,#f8fbff 0%, #ffffff 100%);
     box-shadow:0 2px 10px rgba(0,0,0,.04);
     margin-bottom:14px;
 }
-.product-card {
-    border:1px solid #e2e8f0;
-    border-radius:20px;
+.catalog-title {
+    font-size:1.55rem;
+    font-weight:900;
+    color:#172554;
+    line-height:1.1;
+}
+.catalog-sub {
+    color:#64748b;
+    font-size:.9rem;
+    font-weight:600;
+    margin-top:4px;
+}
+.product-card-horizontal {
     padding:14px;
-    background:#ffffff;
-    box-shadow:0 2px 12px rgba(15,23,42,.045);
-    height:100%;
-    transition:transform .18s ease, box-shadow .18s ease, border-color .18s ease;
+    border-radius:20px;
+    margin-bottom:16px;
 }
-.product-card:hover {
-    border-color:#c7d2fe;
-    box-shadow:0 8px 24px rgba(37,99,235,.09);
-    transform: translateY(-2px);
-}
-.product-image-shell {
+.product-image-wrap {
     border:1px solid #eef2f7;
-    background:linear-gradient(180deg,#ffffff 0%, #fbfdff 100%);
+    background:linear-gradient(180deg,#ffffff 0%,#fbfdff 100%);
     border-radius:16px;
-    min-height:220px;
+    min-height:170px;
     display:flex;
     align-items:center;
     justify-content:center;
-    margin-bottom:12px;
+    padding:10px;
 }
-.product-title {
-    font-size:1.08rem;
-    font-weight:900;
-    color:#0f172a;
-    line-height:1.18;
-    min-height:50px;
-    margin-bottom:4px;
-}
-.product-sku-line {
-    color:#64748b;
-    font-size:.82rem;
-    margin-bottom:8px;
-}
-.stock-chip {
-    display:inline-flex;
-    align-items:center;
-    gap:6px;
-    padding:6px 10px;
-    border-radius:999px;
-    font-size:.78rem;
-    font-weight:900;
-    margin:2px 0 8px 0;
-}
-.stock-chip.ok { background:#dcfce7; color:#166534; }
-.stock-chip.no { background:#fee2e2; color:#991b1b; }
-.meta-line {
-    color:#6b7280;
-    font-size:.82rem;
-    margin-bottom:10px;
-}
-.price-block {
-    border-top:1px solid #f1f5f9;
-    border-bottom:1px solid #f1f5f9;
-    padding:10px 0;
-    margin:6px 0 10px 0;
-}
-.price-main {
-    font-size:1.22rem;
+.product-title-horizontal {
+    font-size:1.15rem;
     font-weight:900;
     color:#111827;
-    margin-top:0;
+    line-height:1.15;
+    margin-bottom:4px;
 }
-.price-bs {
-    font-size:.92rem;
-    color:#047857;
-    font-weight:800;
-}
-.price-subline {
-    color:#6b7280;
+.product-meta-line {
+    color:#64748b;
     font-size:.83rem;
+    margin-bottom:8px;
+}
+.stock-line {
+    margin:6px 0 8px 0;
+}
+.price-section {
+    margin-top:8px;
+    padding-top:8px;
+    border-top:1px solid #f1f5f9;
+}
+.price-grid-line {
+    color:#6b7280;
+    font-size:.84rem;
     line-height:1.35;
-    margin-top:5px;
+    margin-top:4px;
+}
+.actions-panel {
+    border-left:1px solid #eef2f7;
+    padding-left:14px;
+}
+.actions-total {
+    margin-top:8px;
+    border:1px solid #e2e8f0;
+    border-radius:12px;
+    padding:8px 10px;
+    background:#f8fafc;
+}
+.actions-total-title {
+    color:#475569;
+    font-size:.8rem;
+    font-weight:700;
+}
+.actions-total-value {
+    color:#111827;
+    font-size:1.08rem;
+    font-weight:900;
 }
 .ml-suggest-box {
     margin-top:10px;
     border:1px solid #dbeafe;
     background:#eff6ff;
-    border-radius:14px;
-    padding:10px;
+    border-radius:12px;
+    padding:8px 10px;
 }
 .ml-suggest-title {
     font-weight:900;
     color:#1d4ed8;
-    margin-bottom:4px;
-}
-.product-controls-wrap {
-    margin-top:10px;
-}
-.product-bottom-actions {
-    margin-top:12px;
-}
-.product-zoom-btn button {
-    min-height:48px !important;
+    margin-bottom:3px;
 }
 
 </style>
@@ -3241,109 +3208,115 @@ def render_card_producto(prod, user):
     stock = int(prod["wc_stock"] or 0)
     disp = disponibilidad(prod)
     img = prod["wc_imagen_url"]
+
     try:
-        categoria_txt = prod["categoria"] if "categoria" in prod.keys() and prod["categoria"] else categoria_nombre(prod["categoria_id"])
+        categoria_txt = prod["categoria"]
     except Exception:
         categoria_txt = categoria_nombre(prod["categoria_id"])
 
-    st.markdown('<div class="product-card">', unsafe_allow_html=True)
+    st.markdown('<div class="product-card product-card-horizontal">', unsafe_allow_html=True)
 
-    img_col, zoom_col = st.columns([5, 1])
-    with img_col:
-        st.markdown('<div class="product-image-shell">', unsafe_allow_html=True)
+    left, center, right = st.columns([1.1, 2.2, 1.35], vertical_alignment="top")
+
+    with left:
+        st.markdown('<div class="product-image-wrap">', unsafe_allow_html=True)
         if img:
-            st.image(img, width=190)
+            st.image(img, width=150)
         else:
-            st.markdown("<div style='height:190px;width:190px;max-width:100%;border-radius:14px;background:#f3f4f6;display:flex;align-items:center;justify-content:center;font-size:46px'>📦</div>", unsafe_allow_html=True)
+            st.markdown("<div style='height:150px;width:150px;border-radius:14px;background:#f3f4f6;display:flex;align-items:center;justify-content:center;font-size:42px'>📦</div>", unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
-    with zoom_col:
-        st.markdown('<div class="product-zoom-btn">', unsafe_allow_html=True)
-        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
-        if st.button("🔍", key=f"zoom_{prod['sku']}", help="Ampliar imagen", use_container_width=True):
+        if st.button("🔍 Ver imagen", key=f"zoom_{prod['sku']}", use_container_width=True):
             dialog_imagen(prod["descripcion"], prod["sku"], img)
+
+    with center:
+        st.markdown(f'<div class="product-title-horizontal">{prod["descripcion"]}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="product-meta-line">SKU: {prod["sku"]} · {categoria_txt}</div>', unsafe_allow_html=True)
+
+        if stock > 0 and prod["wc_stock_status"] != "outofstock":
+            st.markdown(f'<div class="stock-line"><span class="badge badge-ok">Disponible: {stock} {prod["unidad_base"]}</span></div>', unsafe_allow_html=True)
+        else:
+            st.markdown('<div class="stock-line"><span class="badge badge-no">Sin stock</span></div>', unsafe_allow_html=True)
+
+        st.markdown(f'<div class="product-meta-line">Docenas: {disp["docenas"]} · Bultos: {disp["bultos"]}</div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="price-section">', unsafe_allow_html=True)
+        st.markdown(f"<div class='price-main'>Unidad: {money_usd(prod['precio_unidad'])}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='price-bs'>{money_bs(float(prod['precio_unidad'] or 0) * tasa)}</div>", unsafe_allow_html=True)
+
+        detail_lines = []
+        if int(prod["maneja_docena"] or 0):
+            detail_lines.append(f"Docena: <b>{money_usd(prod['precio_docena'])}</b> · {money_bs(float(prod['precio_docena'] or 0) * tasa)}")
+        if int(prod["maneja_bulto"] or 0):
+            bulto_contiene = int(prod["bulto_contiene"] or 1)
+            precio_bulto_unitario = float(prod["precio_bulto"] or 0)
+            total_bulto_usd = precio_bulto_unitario * bulto_contiene
+            total_bulto_bs = total_bulto_usd * tasa
+            detail_lines.append(f"Bulto: <b>{money_usd(precio_bulto_unitario)}</b> c/u · {money_bs(precio_bulto_unitario * tasa)} c/u")
+            detail_lines.append(f"<span style='color:#047857;font-weight:800'>Bulto Total ({bulto_contiene} {prod['unidad_base']}): {money_usd(total_bulto_usd)} · {money_bs(total_bulto_bs)}</span>")
+        if detail_lines:
+            st.markdown("<div class='price-grid-line'>" + "<br>".join(detail_lines) + "</div>", unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
 
-    st.markdown(f'<div class="product-title">{prod["descripcion"]}</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="product-sku-line">SKU: {prod["sku"]} · {categoria_txt}</div>', unsafe_allow_html=True)
+        if user["rol"] in ["admin", "vendedor_mercadolibre"]:
+            com_ml = get_comision_ml_pct()
+            ml_u_bs, ml_u_bcv = precio_ml_resumen(prod["precio_unidad"])
+            ml_d_bs, ml_d_bcv = precio_ml_resumen(prod["precio_docena"])
+            ml_b_bs, ml_b_bcv = precio_ml_resumen(prod["precio_bulto"])
+            st.markdown(
+                f"""
+                <div class="ml-suggest-box">
+                  <div class="ml-suggest-title">Sugerido MercadoLibre (+{com_ml:.1f}%)</div>
+                  <div class="muted">Unidad: <b>{money_bs(ml_u_bs)}</b> · Eq. BCV ${ml_u_bcv:,.2f}</div>
+                  <div class="muted">Docena c/u: <b>{money_bs(ml_d_bs)}</b> · Eq. BCV ${ml_d_bcv:,.2f}</div>
+                  <div class="muted">Bulto c/u: <b>{money_bs(ml_b_bs)}</b> · Eq. BCV ${ml_b_bcv:,.2f}</div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
 
-    if stock > 0 and prod["wc_stock_status"] != "outofstock":
-        st.markdown(f'<div class="stock-chip ok">Disponible: {stock} {prod["unidad_base"]}</div>', unsafe_allow_html=True)
-    else:
-        st.markdown('<div class="stock-chip no">Sin stock</div>', unsafe_allow_html=True)
+    with right:
+        st.markdown('<div class="actions-panel">', unsafe_allow_html=True)
 
-    st.markdown(f'<div class="meta-line">Docenas: {disp["docenas"]} · Bultos: {disp["bultos"]}</div>', unsafe_allow_html=True)
+        opciones = ["unidad"]
+        if int(prod["maneja_docena"] or 0):
+            opciones.append("docena")
+        if int(prod["maneja_bulto"] or 0):
+            opciones.append("bulto")
 
-    st.markdown('<div class="price-block">', unsafe_allow_html=True)
-    st.markdown(f"<div class='price-main'>Unidad: {money_usd(prod['precio_unidad'])}</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='price-bs'>{money_bs(float(prod['precio_unidad'] or 0) * tasa)}</div>", unsafe_allow_html=True)
+        presentacion = st.selectbox("Presentación", opciones, key=f"pres_{prod['sku']}", label_visibility="collapsed")
 
-    sub_lines = []
-    if int(prod["maneja_docena"] or 0):
-        sub_lines.append(f"Docena: <b>{money_usd(prod['precio_docena'])}</b> · {money_bs(float(prod['precio_docena'] or 0) * tasa)}")
-    if int(prod["maneja_bulto"] or 0):
-        bulto_contiene = int(prod["bulto_contiene"] or 1)
-        precio_bulto_unitario = float(prod["precio_bulto"] or 0)
-        total_bulto_usd = precio_bulto_unitario * bulto_contiene
-        total_bulto_bs = total_bulto_usd * tasa
-        sub_lines.append(f"Bulto: <b>{money_usd(precio_bulto_unitario)}</b> c/u · {money_bs(precio_bulto_unitario * tasa)} c/u")
-        sub_lines.append(f"<span style='color:#047857;font-weight:800'>Bulto Total ({bulto_contiene} {prod['unidad_base']}): {money_usd(total_bulto_usd)} · {money_bs(total_bulto_bs)}</span>")
-    if sub_lines:
-        st.markdown("<div class='price-subline'>" + "<br>".join(sub_lines) + "</div>", unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)
+        if presentacion == "unidad":
+            cantidad = st.number_input("Cantidad", min_value=1, max_value=9999, value=1, step=1, key=f"cant_{prod['sku']}", label_visibility="collapsed")
+        else:
+            cantidad = 1
+            st.number_input("Cantidad", min_value=1, max_value=1, value=1, step=1, key=f"cant_locked_{prod['sku']}_{presentacion}", label_visibility="collapsed", disabled=True)
 
-    if user["rol"] in ["admin", "vendedor_mercadolibre"]:
-        com_ml = get_comision_ml_pct()
-        ml_u_bs, ml_u_bcv = precio_ml_resumen(prod["precio_unidad"])
-        ml_d_bs, ml_d_bcv = precio_ml_resumen(prod["precio_docena"])
-        ml_b_bs, ml_b_bcv = precio_ml_resumen(prod["precio_bulto"])
+        precio_calc = calcular_precio_inteligente(prod, presentacion, int(cantidad))
+        precio_pres = float(precio_calc["precio_presentacion"])
+        eq = int(precio_calc["equivalencia"])
+        unidades_base_total = int(precio_calc["unidades_base_total"])
+        precio_total_calc = float(precio_calc["precio_total"])
+        escala_aplicada = precio_calc["escala_aplicada"]
+
         st.markdown(
             f"""
-            <div class="ml-suggest-box">
-              <div class="ml-suggest-title">Sugerido MercadoLibre (+{com_ml:.1f}%)</div>
-              <div class="muted">Unidad: <b>{money_bs(ml_u_bs)}</b> · Eq. BCV ${ml_u_bcv:,.2f}</div>
-              <div class="muted">Docena c/u: <b>{money_bs(ml_d_bs)}</b> · Eq. BCV ${ml_d_bcv:,.2f}</div>
-              <div class="muted">Bulto c/u: <b>{money_bs(ml_b_bs)}</b> · Eq. BCV ${ml_b_bcv:,.2f}</div>
+            <div class="actions-total">
+                <div class="actions-total-title">Selección actual</div>
+                <div class="actions-total-value">{money_usd(precio_total_calc)}</div>
+                <div class="muted">{unidades_base_total} unidad(es) base</div>
             </div>
             """,
             unsafe_allow_html=True
         )
 
-    opciones = ["unidad"]
-    if int(prod["maneja_docena"] or 0):
-        opciones.append("docena")
-    if int(prod["maneja_bulto"] or 0):
-        opciones.append("bulto")
+        if unidades_base_total > stock:
+            st.warning(f"No alcanza stock. Requiere {unidades_base_total}, disponible {stock}.")
+            disabled = True
+        else:
+            disabled = False
 
-    st.markdown('<div class="product-controls-wrap">', unsafe_allow_html=True)
-    c1, c2 = st.columns([1.2, 1])
-    presentacion = c1.selectbox("Presentación", opciones, key=f"pres_{prod['sku']}", label_visibility="collapsed")
-
-    if presentacion == "unidad":
-        cantidad = c2.number_input("Cantidad", min_value=1, max_value=9999, value=1, step=1, key=f"cant_{prod['sku']}", label_visibility="collapsed")
-    else:
-        cantidad = 1
-        c2.number_input("Cantidad", min_value=1, max_value=1, value=1, step=1, key=f"cant_locked_{prod['sku']}_{presentacion}", label_visibility="collapsed", disabled=True)
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    precio_calc = calcular_precio_inteligente(prod, presentacion, int(cantidad))
-    precio_pres = float(precio_calc["precio_presentacion"])
-    eq = int(precio_calc["equivalencia"])
-    unidades_base_total = int(precio_calc["unidades_base_total"])
-    precio_total_calc = float(precio_calc["precio_total"])
-    escala_aplicada = precio_calc["escala_aplicada"]
-
-    if unidades_base_total > stock:
-        st.warning(f"No alcanza stock. Requiere {unidades_base_total}, disponible {stock}.")
-        disabled = True
-    else:
-        disabled = False
-
-    st.markdown('<div class="product-bottom-actions">', unsafe_allow_html=True)
-    badge_col, add_col = st.columns([1.15, 1.35])
-    with badge_col:
         show_producto_carrito_badge(user["username"], prod["sku"])
 
-    with add_col:
         if st.button("🛒 Agregar", key=f"add_{prod['sku']}", type="primary", use_container_width=True, disabled=disabled):
             carrito = cargar_carrito(user["username"])
             key = f"{prod['sku']}::{presentacion}"
@@ -3377,15 +3350,16 @@ def render_card_producto(prod, user):
                 "success"
             )
             st.rerun()
-    st.markdown('</div>', unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)
 
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown("</div>", unsafe_allow_html=True)
 
 def tienda():
     st.markdown("""
-    <div class="catalog-hero">
-        <div class="catalog-hero-title">Tienda / Catálogo</div>
-        <div class="catalog-hero-sub">Explora productos, consulta precios al mayor y agrega rápidamente al carrito.</div>
+    <div class="catalog-topbar">
+        <div class="catalog-title">Tienda / Catálogo</div>
+        <div class="catalog-sub">Consulta productos, precios al mayor y agrega rápidamente al carrito.</div>
     </div>
     """, unsafe_allow_html=True)
     show_last_cart_action()
@@ -3400,7 +3374,7 @@ def tienda():
     cat_ids.update({c["nombre"]: c["id"] for c in cats})
 
     # Encabezado compacto para ganar espacio horizontal.
-    st.markdown('<div class="toolbar-card">', unsafe_allow_html=True)
+    st.markdown('<div class="card">', unsafe_allow_html=True)
     top1, top2, top3, top4 = st.columns([2.2, 3.2, 1.3, 1.5])
 
     with top1:
@@ -3436,7 +3410,7 @@ def tienda():
     rows = q(sql, params, fetch=True)
 
     rinfo1, rinfo2 = st.columns([3, 1])
-    rinfo1.caption(f"{len(rows)} productos encontrados en el catálogo")
+    rinfo1.caption(f"{len(rows)} productos encontrados")
     if rinfo2.button("🔄 Actualizar stock", use_container_width=True):
         with st.spinner("Sincronizando WooCommerce..."):
             ok, no, errors = sync_todos_productos()
@@ -3450,10 +3424,8 @@ def tienda():
         st.info("No hay productos para mostrar.")
         return
 
-    cols = st.columns(4)
-    for i, prod in enumerate(rows):
-        with cols[i % 4]:
-            render_card_producto(prod, user)
+    for prod in rows:
+        render_card_producto(prod, user)
 
 
 def carrito_view():
