@@ -40,7 +40,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V2 Fix33 Lista Horizontal"
+APP_NAME = "Sistema de Insumos al Mayor V2 Fix34 Horizontal Compacto"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -331,6 +331,14 @@ div[data-testid="stForm"] {
         border-left: none;
         padding-left: 0;
     }
+}
+
+
+.actions-foot-note {
+    margin-top: 8px;
+    color: #64748b;
+    font-size: .82rem;
+    line-height: 1.3;
 }
 
 </style>
@@ -3218,7 +3226,6 @@ def render_card_producto(prod, user):
         else:
             st.markdown('<span class="badge badge-no">Sin stock</span>', unsafe_allow_html=True)
 
-        st.markdown(f'<div class="catalog-list-meta" style="margin-top:6px;">Docenas: {disp["docenas"]} · Bultos: {disp["bultos"]}</div>', unsafe_allow_html=True)
 
         st.markdown('<div class="catalog-list-prices">', unsafe_allow_html=True)
         st.markdown(f"<div class='price-main'>Unidad: {money_usd(prod['precio_unidad'])}</div>", unsafe_allow_html=True)
@@ -3331,6 +3338,11 @@ def render_card_producto(prod, user):
                 "success"
             )
             st.rerun()
+
+        st.markdown(
+            f'<div class="actions-foot-note">Docenas: <b>{disp["docenas"]}</b> · Bultos: <b>{disp["bultos"]}</b></div>',
+            unsafe_allow_html=True
+        )
 
         st.markdown("</div>", unsafe_allow_html=True)
 
