@@ -40,7 +40,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V2 Fix26 Catálogo Banners"
+APP_NAME = "Sistema de Insumos al Mayor V2 Fix27 Catálogo Ordenado"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -255,34 +255,50 @@ div[data-testid="stForm"] {
 }
 
 
-/* Banner compacto de categoría en tienda */
-.category-banner {
-    border: 1px solid #dbeafe;
+
+/* Catálogo ordenado: cards con altura estable */
+.product-card-bubble {
+    border: 1px solid #e2e8f0;
+    background: #ffffff;
     border-radius: 18px;
-    background: linear-gradient(135deg, #eff6ff 0%, #ffffff 65%);
-    padding: 14px 16px;
-    margin: 8px 0 14px 0;
-    box-shadow: 0 2px 10px rgba(37, 99, 235, 0.06);
+    padding: 14px;
+    margin-bottom: 18px;
+    min-height: 860px;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 2px 10px rgba(15, 23, 42, 0.05);
 }
-.category-banner-title {
-    font-size: 1.15rem;
+.product-card-image-zone {
+    min-height: 245px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.product-card-title-zone {
+    min-height: 118px;
+}
+.product-card-price-zone {
+    min-height: 235px;
+}
+.product-card-ml-zone {
+    min-height: 128px;
+}
+.product-card-controls-zone {
+    min-height: 126px;
+}
+.product-card-bottom-zone {
+    margin-top: auto;
+}
+.product-card-title {
+    font-size: 1.02rem;
+    line-height: 1.2;
     font-weight: 900;
-    color: #1e293b;
+    color: #0f172a;
 }
-.category-banner-sub {
+.product-card-sku {
     color: #64748b;
-    font-size: .88rem;
-    font-weight: 600;
-}
-.category-banner-pill {
-    display: inline-block;
-    margin-top: 8px;
-    background: #dbeafe;
-    color: #1d4ed8;
-    padding: 4px 10px;
-    border-radius: 999px;
-    font-size: .78rem;
-    font-weight: 900;
+    font-size: .84rem;
+    margin-top: 6px;
 }
 
 </style>
@@ -483,789 +499,6 @@ def show_cart_bubble(username: str):
         """,
         unsafe_allow_html=True
     )
-
-def set_categoria_tienda(cat_name: str):
-    st.session_state["tienda_categoria"] = cat_name
-
-def categoria_portada(cat_sel: str):
-    if cat_sel == "Todas":
-        row = q("""SELECT p.*, c.nombre AS categoria
-                   FROM productos p LEFT JOIN categorias c ON p.categoria_id=c.id
-                   WHERE p.activo=1 AND COALESCE(p.wc_imagen_url,'')!=''
-                   ORDER BY p.wc_stock DESC, p.descripcion LIMIT 1""", fetch=True)
-    else:
-        row = q("""SELECT p.*, c.nombre AS categoria
-                   FROM productos p LEFT JOIN categorias c ON p.categoria_id=c.id
-                   WHERE p.activo=1 AND c.nombre=? AND COALESCE(p.wc_imagen_url,'')!=''
-                   ORDER BY p.wc_stock DESC, p.descripcion LIMIT 1""", (cat_sel,), fetch=True)
-    return row[0] if row else None
-
-def show_categoria_banner(cat_sel: str, total_productos: int):
-    portada = categoria_portada(cat_sel)
-    title = "Todas las categorías" if cat_sel == "Todas" else cat_sel
-    sub = f"{total_productos} producto(s) disponibles en esta selección"
-    col_img, col_txt = st.columns([0.8, 3.2])
-    with col_img:
-        if portada and portada["wc_imagen_url"]:
-            st.image(portada["wc_imagen_url"], width=110)
-        else:
-            st.markdown("<div style='height:100px;border-radius:16px;background:#f3f4f6;display:flex;align-items:center;justify-content:center;font-size:34px'>📦</div>", unsafe_allow_html=True)
-    with col_txt:
-        st.markdown(
-            f"""
-            <div class="category-banner">
-                <div class="category-banner-title">{title}</div>
-                <div class="category-banner-sub">{sub}</div>
-                <span class="category-banner-pill">Catálogo COLOR INSUMOS</span>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-
-def hash_password(password: str) -> str:
-    salt = secrets.token_hex(16)
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 180000)
-    return f"pbkdf2_sha256${salt}${digest.hex()}"
-
-def verify_password(password: str, stored: str) -> bool:
-    if not stored:
-        return False
-    if not stored.startswith("pbkdf2_sha256$"):
-        return password == stored
-    try:
-        _, salt, hex_digest = stored.split("$", 2)
-        digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 180000).hex()
-        return secrets.compare_digest(digest, hex_digest)
-    except Exception:
-        return False
-
-def init_db():
-    q("""
-    CREATE TABLE IF NOT EXISTS usuarios (
-        username TEXT PRIMARY KEY,
-        password_hash TEXT,
-        nombre TEXT,
-        rol TEXT DEFAULT 'comprador',
-        telefono TEXT,
-        rif TEXT,
-        direccion TEXT,
-        ciudad TEXT,
-        activo INTEGER DEFAULT 1,
-        tipo_precio TEXT DEFAULT 'proveedor',
-        creado_en TEXT
-    )
-    """)
-    q("""
-    CREATE TABLE IF NOT EXISTS categorias (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        nombre TEXT UNIQUE,
-        descripcion TEXT,
-        activa INTEGER DEFAULT 1,
-        orden INTEGER DEFAULT 0,
-        creado_en TEXT
-    )
-    """)
-    q("""
-    CREATE TABLE IF NOT EXISTS productos (
-        sku TEXT PRIMARY KEY,
-        descripcion TEXT,
-        categoria_id INTEGER,
-        unidad_base TEXT DEFAULT 'unidad',
-        precio_unidad REAL DEFAULT 0,
-        precio_docena REAL DEFAULT 0,
-        precio_bulto REAL DEFAULT 0,
-        bulto_contiene INTEGER DEFAULT 1,
-        maneja_docena INTEGER DEFAULT 1,
-        maneja_bulto INTEGER DEFAULT 1,
-        peso_unidad_kg REAL DEFAULT 0,
-        activo INTEGER DEFAULT 1,
-        wc_product_id INTEGER,
-        wc_nombre TEXT,
-        wc_stock INTEGER DEFAULT 0,
-        wc_stock_status TEXT,
-        wc_imagen_url TEXT,
-        wc_permalink TEXT,
-        ultima_sync TEXT,
-        creado_en TEXT,
-        actualizado_en TEXT
-    )
-    """)
-    q("""
-    CREATE TABLE IF NOT EXISTS carritos (
-        username TEXT PRIMARY KEY,
-        data TEXT
-    )
-    """)
-    q("""
-    CREATE TABLE IF NOT EXISTS cotizaciones (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        fecha TEXT,
-        username TEXT,
-        cliente_nombre TEXT,
-        cliente_rif TEXT,
-        cliente_telefono TEXT,
-        cliente_direccion TEXT,
-        items TEXT,
-        subtotal_usd REAL DEFAULT 0,
-        envio_usd REAL DEFAULT 0,
-        total_usd REAL DEFAULT 0,
-        tasa_proveedor REAL DEFAULT 0,
-        tasa_bcv REAL DEFAULT 0,
-        total_bs_proveedor REAL DEFAULT 0,
-        peso_total_kg REAL DEFAULT 0,
-        validez_dias INTEGER DEFAULT 1,
-        status TEXT DEFAULT 'Pendiente',
-        notas TEXT
-    )
-    """)
-
-    q("""
-    CREATE TABLE IF NOT EXISTS pedidos (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        fecha TEXT,
-        username TEXT,
-        cliente_nombre TEXT,
-        cliente_rif TEXT,
-        cliente_telefono TEXT,
-        cliente_direccion TEXT,
-        items TEXT,
-        tipo_pago TEXT DEFAULT 'contado',
-        metodo_pago TEXT,
-        subtotal_usd REAL DEFAULT 0,
-        envio_usd REAL DEFAULT 0,
-        total_usd REAL DEFAULT 0,
-        tasa_proveedor REAL DEFAULT 0,
-        total_bs_proveedor REAL DEFAULT 0,
-        peso_total_kg REAL DEFAULT 0,
-        status TEXT DEFAULT 'Pendiente',
-        credito_id INTEGER,
-        notas TEXT
-    )
-    """)
-    q("""
-    CREATE TABLE IF NOT EXISTS creditos (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        pedido_id INTEGER,
-        username TEXT,
-        cliente_nombre TEXT,
-        fecha_inicio TEXT,
-        fecha_vencimiento TEXT,
-        monto_usd REAL DEFAULT 0,
-        saldo_usd REAL DEFAULT 0,
-        tasa_proveedor REAL DEFAULT 0,
-        status TEXT DEFAULT 'Pendiente',
-        notas TEXT
-    )
-    """)
-    q("""
-    CREATE TABLE IF NOT EXISTS abonos (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        credito_id INTEGER,
-        pedido_id INTEGER,
-        username TEXT,
-        fecha TEXT,
-        monto_usd REAL DEFAULT 0,
-        monto_bs REAL DEFAULT 0,
-        metodo TEXT,
-        referencia TEXT,
-        comprobante_path TEXT,
-        status TEXT DEFAULT 'Pendiente de validar',
-        validado_por TEXT,
-        fecha_validacion TEXT,
-        notas TEXT
-    )
-    """)
-    q("""
-    CREATE TABLE IF NOT EXISTS configuracion (
-        clave TEXT PRIMARY KEY,
-        valor TEXT
-    )
-    """)
-
-    q("""
-    CREATE TABLE IF NOT EXISTS productos_vendedores (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        sku TEXT,
-        vendedor_username TEXT,
-        fecha_asignacion TEXT,
-        notas TEXT,
-        UNIQUE(sku, vendedor_username)
-    )
-    """)
-
-    def set_default(clave, valor):
-        exists = q("SELECT clave FROM configuracion WHERE clave=?", (clave,), fetch=True)
-        if not exists:
-            q("INSERT INTO configuracion (clave, valor) VALUES (?,?)", (clave, str(valor)))
-
-    set_default("tasa_bcv", "0")
-    set_default("tasa_proveedor", "0")
-    set_default("fecha_tasa_bcv", "Sin actualizar")
-    set_default("fuente_tasa_bcv", "Manual")
-    set_default("nombre_empresa", "Sistema de Insumos al Mayor")
-    set_default("telefono_empresa", "04127757053")
-    set_default("instagram_empresa", "@color.insumos")
-    set_default("validez_cotizacion_dias", "1")
-    set_default("envio_ml_10_40_usd", "10")
-    set_default("cliente_bcv_activo", "0")
-    set_default("comision_mercadolibre_pct", "16")
-
-    set_default("backup_folder", str(BACKUP_DIR))
-    set_default("backup_auto_diario", "1")
-    set_default("backup_ultima_fecha", "")
-    set_default("dias_credito_default", "10")
-
-    # Migraciones suaves
-    def add_col(table, column, definition):
-        cols = q(f"PRAGMA table_info({table})", fetch=True)
-        if not any(c[1] == column for c in cols):
-            q(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
-
-    add_col("usuarios", "credito_habilitado", "INTEGER DEFAULT 0")
-    add_col("usuarios", "limite_credito_usd", "REAL DEFAULT 0")
-    add_col("usuarios", "dias_credito", "INTEGER DEFAULT 10")
-    add_col("usuarios", "ml_envio", "INTEGER DEFAULT 0")
-    add_col("productos", "costo_proveedor_unitario", "REAL DEFAULT 0")
-    add_col("productos", "envio_costo_bulto", "REAL DEFAULT 0")
-    add_col("productos", "otros_costos_bulto", "REAL DEFAULT 0")
-    add_col("productos", "margen_minimo_pct", "REAL DEFAULT 25")
-    add_col("productos", "pub_instagram", "INTEGER DEFAULT 0")
-    add_col("productos", "pub_mercadolibre", "INTEGER DEFAULT 0")
-    add_col("productos", "pub_marketplace", "INTEGER DEFAULT 0")
-    add_col("productos", "pub_whatsapp", "INTEGER DEFAULT 0")
-    add_col("productos", "pub_web", "INTEGER DEFAULT 0")
-    add_col("productos", "link_instagram", "TEXT")
-    add_col("productos", "link_mercadolibre", "TEXT")
-    add_col("productos", "link_marketplace", "TEXT")
-    add_col("productos", "link_whatsapp", "TEXT")
-    add_col("productos", "notas_publicacion", "TEXT")
-    add_col("pedidos", "pos_procesado", "INTEGER DEFAULT 0")
-    add_col("pedidos", "pos_fecha", "TEXT")
-    add_col("pedidos", "pos_usuario", "TEXT")
-    add_col("pedidos", "pos_notas", "TEXT")
-
-    # Categorías iniciales:
-    # Se crean una sola vez. Antes se recreaban en cada arranque si el admin las borraba.
-    categorias_flag = q("SELECT valor FROM configuracion WHERE clave='categorias_iniciales_creadas'", fetch=True)
-    if not categorias_flag:
-        existentes = q("SELECT COUNT(*) AS n FROM categorias", fetch=True)[0]["n"]
-        if int(existentes or 0) == 0:
-            for i, cat in enumerate(["Papeles", "Stickers", "Sublimación", "Tintas", "Rollos", "Equipos", "General"], start=1):
-                q("INSERT OR IGNORE INTO categorias (nombre, descripcion, activa, orden, creado_en) VALUES (?,?,?,?,?)",
-                  (cat, "", 1, i, now()))
-        q("INSERT OR REPLACE INTO configuracion (clave, valor) VALUES (?,?)", ("categorias_iniciales_creadas", "1"))
-
-    # Admin inicial
-    admin = q("SELECT username FROM usuarios WHERE username=?", ("colorinsumos@gmail.com",), fetch=True)
-    if not admin:
-        q("""INSERT INTO usuarios (username,password_hash,nombre,rol,telefono,activo,tipo_precio,creado_en)
-             VALUES (?,?,?,?,?,?,?,?)""",
-          ("colorinsumos@gmail.com", hash_password("20880157"), "Administrador", "admin", "04127757053", 1, "proveedor", now()))
-
-init_db()
-
-# -----------------------------
-# CONFIG / MONEY
-# -----------------------------
-def get_config(clave, default=""):
-    row = q("SELECT valor FROM configuracion WHERE clave=?", (clave,), fetch=True)
-    return row[0]["valor"] if row else default
-
-def set_config(clave, valor):
-    q("INSERT OR REPLACE INTO configuracion (clave, valor) VALUES (?,?)", (clave, str(valor)))
-
-def parse_float(v, default=0.0):
-    try:
-        if v is None:
-            return default
-        s = str(v).replace("$", "").replace("Bs", "").strip()
-        if s.count(",") == 1 and s.count(".") > 1:
-            s = s.replace(".", "").replace(",", ".")
-        else:
-            s = s.replace(",", ".")
-        return float(s)
-    except Exception:
-        return default
-
-def money_usd(x):
-    try:
-        return f"${float(x):,.2f}"
-    except Exception:
-        return "$0.00"
-
-def money_bs(x):
-    """Formato venezolano: puntos para miles y coma para decimales. Ej: Bs. 1.224,00"""
-    try:
-        s = f"{float(x):,.2f}"
-        s = s.replace(",", "X").replace(".", ",").replace("X", ".")
-        return f"Bs. {s}"
-    except Exception:
-        return "Bs. 0,00"
-
-def get_tasa_proveedor():
-    return parse_float(get_config("tasa_proveedor", "0"), 0)
-
-def get_tasa_bcv():
-    return parse_float(get_config("tasa_bcv", "0"), 0)
-
-
-def calc_costos_margen(prod):
-    bulto_contiene = max(1, int(prod["bulto_contiene"] or 1))
-    costo_unit = float(prod["costo_proveedor_unitario"] or 0)
-    envio_bulto = float(prod["envio_costo_bulto"] or 0)
-    otros_bulto = float(prod["otros_costos_bulto"] or 0)
-    costo_logistico_unit = (envio_bulto + otros_bulto) / bulto_contiene
-    costo_real_unit = costo_unit + costo_logistico_unit
-
-    def margen(precio_unit):
-        precio_unit = float(precio_unit or 0)
-        gan = precio_unit - costo_real_unit
-        pct = (gan / precio_unit * 100) if precio_unit > 0 else 0
-        return {"precio": precio_unit, "ganancia": gan, "margen_pct": pct}
-
-    unidad = margen(prod["precio_unidad"])
-    docena = margen(prod["precio_docena"])
-    bulto = margen(prod["precio_bulto"])
-
-    ingreso_bulto = float(prod["precio_bulto"] or 0) * bulto_contiene
-    costo_bulto = costo_unit * bulto_contiene + envio_bulto + otros_bulto
-    gan_bulto_total = ingreso_bulto - costo_bulto
-    margen_bulto_total = (gan_bulto_total / ingreso_bulto * 100) if ingreso_bulto > 0 else 0
-
-    return {
-        "bulto_contiene": bulto_contiene,
-        "costo_proveedor_unitario": costo_unit,
-        "envio_bulto": envio_bulto,
-        "otros_bulto": otros_bulto,
-        "costo_logistico_unitario": costo_logistico_unit,
-        "costo_real_unitario": costo_real_unit,
-        "unidad": unidad,
-        "docena": docena,
-        "bulto": bulto,
-        "ingreso_bulto": ingreso_bulto,
-        "costo_bulto": costo_bulto,
-        "ganancia_bulto_total": gan_bulto_total,
-        "margen_bulto_total": margen_bulto_total,
-    }
-
-
-def calcular_valor_inventario_producto(prod):
-    stock = int(prod["wc_stock"] or 0)
-    m = calc_costos_margen(prod)
-    costo_real = float(m["costo_real_unitario"] or 0)
-
-    valor_costo = stock * costo_real
-    valor_venta_unidad = stock * float(prod["precio_unidad"] or 0)
-    valor_venta_docena = stock * float(prod["precio_docena"] or 0)
-    valor_venta_bulto = stock * float(prod["precio_bulto"] or 0)
-
-    bulto_contiene = max(1, int(prod["bulto_contiene"] or 1))
-    return {
-        "stock": stock,
-        "bulto_contiene": bulto_contiene,
-        "bultos_disp": stock // bulto_contiene,
-        "resto": stock % bulto_contiene,
-        "costo_real_unitario": costo_real,
-        "valor_costo": valor_costo,
-        "valor_venta_unidad": valor_venta_unidad,
-        "valor_venta_docena": valor_venta_docena,
-        "valor_venta_bulto": valor_venta_bulto,
-        "gan_unidad": valor_venta_unidad - valor_costo,
-        "gan_docena": valor_venta_docena - valor_costo,
-        "gan_bulto": valor_venta_bulto - valor_costo,
-    }
-
-def etiqueta_margen(pct, minimo=25):
-    pct = float(pct or 0)
-    minimo = float(minimo or 0)
-    if pct < minimo:
-        return "⚠️ Bajo"
-    if pct < minimo + 10:
-        return "🟡 Aceptable"
-    return "✅ Saludable"
-
-
-def precio_sugerido_por_margen(costo_real_unitario, margen_objetivo_pct):
-    """
-    Precio sugerido usando margen sobre precio de venta:
-    margen = (precio - costo) / precio
-    precio = costo / (1 - margen)
-    """
-    costo = float(costo_real_unitario or 0)
-    pct = max(0.0, min(95.0, float(margen_objetivo_pct or 0))) / 100
-    if costo <= 0:
-        return 0.0
-    if pct >= 0.95:
-        pct = 0.95
-    return costo / (1 - pct)
-
-
-def get_comision_ml_pct():
-    return parse_float(get_config("comision_mercadolibre_pct", "16"), 16)
-
-def precio_ml_bs(precio_divisas):
-    """
-    Fórmula MercadoLibre:
-    Precio divisas x tasa proveedor = base Bs
-    base Bs + % comisión ML = precio sugerido Bs para publicar.
-    """
-    tasa = get_tasa_proveedor()
-    comision = get_comision_ml_pct() / 100
-    base_bs = float(precio_divisas or 0) * tasa
-    return base_bs * (1 + comision)
-
-def precio_ml_resumen(precio_divisas):
-    bs = precio_ml_bs(precio_divisas)
-    tasa_bcv = get_tasa_bcv()
-    usd_bcv_equiv = bs / tasa_bcv if tasa_bcv > 0 else 0
-    return bs, usd_bcv_equiv
-
-def resumen_publicacion_icons(prod):
-    return " ".join([
-        "🌐" if int(prod["pub_web"] or 0) else "▫️",
-        "📸" if int(prod["pub_instagram"] or 0) else "▫️",
-        "🛒" if int(prod["pub_mercadolibre"] or 0) else "▫️",
-        "📍" if int(prod["pub_marketplace"] or 0) else "▫️",
-        "💬" if int(prod["pub_whatsapp"] or 0) else "▫️",
-    ])
-
-def pendientes_publicacion(prod):
-    pend = []
-    if not int(prod["pub_instagram"] or 0): pend.append("Instagram")
-    if not int(prod["pub_mercadolibre"] or 0): pend.append("MercadoLibre")
-    if not int(prod["pub_marketplace"] or 0): pend.append("Marketplace")
-    if not int(prod["pub_whatsapp"] or 0): pend.append("WhatsApp")
-    if not int(prod["pub_web"] or 0): pend.append("Web")
-    return pend
-
-# -----------------------------
-# WOO
-# -----------------------------
-def wc_ready():
-    return bool(WC_URL and WC_KEY and WC_SECRET)
-
-def wc_get_by_sku(sku: str) -> Optional[Dict[str, Any]]:
-    if not wc_ready():
-        raise RuntimeError("Faltan WC_URL, WC_KEY o WC_SECRET en .env")
-    url = f"{WC_URL}/wp-json/wc/v3/products"
-    params = {
-        "consumer_key": WC_KEY,
-        "consumer_secret": WC_SECRET,
-        "sku": sku.strip(),
-        "per_page": 20,
-    }
-    r = requests.get(url, params=params, timeout=20)
-    r.raise_for_status()
-    data = r.json()
-    if not isinstance(data, list) or not data:
-        return None
-    return data[0]
-
-def first_image_url(product):
-    images = product.get("images") or []
-    if images and isinstance(images, list):
-        return images[0].get("src")
-    return None
-
-def sync_producto_wc(sku: str):
-    p = wc_get_by_sku(sku)
-    if not p:
-        return False, "No encontrado en WooCommerce"
-    stock_q = p.get("stock_quantity")
-    stock = 0 if stock_q is None else int(float(stock_q))
-    q("""UPDATE productos
-         SET wc_product_id=?, wc_nombre=?, wc_stock=?, wc_stock_status=?, wc_imagen_url=?, wc_permalink=?, ultima_sync=?, actualizado_en=?
-         WHERE sku=?""",
-      (p.get("id"), p.get("name") or "", stock, p.get("stock_status") or "", first_image_url(p), p.get("permalink") or "", now(), now(), sku))
-    return True, f"Sincronizado: stock {stock}"
-
-def sync_todos_productos():
-    rows = q("SELECT sku FROM productos WHERE activo=1", fetch=True)
-    ok = 0
-    no = 0
-    errors = []
-    for r in rows:
-        try:
-            success, msg = sync_producto_wc(r["sku"])
-            if success:
-                ok += 1
-            else:
-                no += 1
-        except Exception as e:
-            no += 1
-            errors.append(f"{r['sku']}: {e}")
-    return ok, no, errors[:10]
-
-# -----------------------------
-# BCV SIMPLE
-# -----------------------------
-def obtener_bcv_web():
-    # Método simple compatible con BCV actual del sistema Pointer.
-    import re
-    from bs4 import BeautifulSoup
-    import urllib3
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-    headers = {"User-Agent": "Mozilla/5.0"}
-    urls = [
-        "https://www.bcv.org.ve/",
-        "https://www.bcv.org.ve/seccionportal/tipo-de-cambio-oficial-del-bcv",
-        "http://www.bcv.org.ve/",
-    ]
-    for url in urls:
-        try:
-            r = requests.get(url, headers=headers, verify=False, timeout=15)
-            if not r.ok:
-                continue
-            if not r.encoding or r.encoding.lower() == "iso-8859-1":
-                r.encoding = r.apparent_encoding or "utf-8"
-            soup = BeautifulSoup(r.text, "html.parser")
-            box = soup.find("div", {"id": "dolar"})
-            if box:
-                strong = box.find("strong")
-                if strong:
-                    val = parse_float(strong.get_text(strip=True), 0)
-                    if val > 1:
-                        return val, "BCV oficial"
-            m = re.search(r'id=["\']dolar["\'][\s\S]{0,3000}?<strong[^>]*>\s*([0-9\.,]+)\s*</strong>', r.text, re.I)
-            if m:
-                val = parse_float(m.group(1), 0)
-                if val > 1:
-                    return val, "BCV oficial"
-        except Exception:
-            continue
-    return None, "No se pudo consultar BCV"
-
-# -----------------------------
-# DATA HELPERS
-# -----------------------------
-def get_user(username):
-    rows = q("SELECT * FROM usuarios WHERE username=?", (username,), fetch=True)
-    return rows[0] if rows else None
-
-def categorias_activas():
-    return q("SELECT * FROM categorias WHERE activa=1 ORDER BY orden, nombre", fetch=True)
-
-def categorias_todas():
-    return q("SELECT * FROM categorias ORDER BY activa DESC, orden, nombre", fetch=True)
-
-def categoria_nombre(cat_id):
-    if not cat_id:
-        return "Sin categoría"
-    rows = q("SELECT nombre FROM categorias WHERE id=?", (cat_id,), fetch=True)
-    return rows[0]["nombre"] if rows else "Sin categoría"
-
-def cargar_carrito(username):
-    row = q("SELECT data FROM carritos WHERE username=?", (username,), fetch=True)
-    if not row or not row[0]["data"]:
-        return {}
-    try:
-        return json.loads(row[0]["data"])
-    except Exception:
-        return {}
-
-def guardar_carrito(username, data):
-    q("INSERT OR REPLACE INTO carritos (username, data) VALUES (?,?)", (username, json.dumps(data, ensure_ascii=False)))
-
-def limpiar_carrito(username):
-    q("DELETE FROM carritos WHERE username=?", (username,))
-
-
-def save_uploaded_file(uploaded, folder: Path, prefix="file"):
-    if uploaded is None:
-        return None
-    folder.mkdir(parents=True, exist_ok=True)
-    ext = Path(uploaded.name).suffix.lower()
-    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", Path(uploaded.name).stem)
-    path = folder / f"{prefix}_{now_file()}_{safe}{ext}"
-    with open(path, "wb") as f:
-        f.write(uploaded.getbuffer())
-    return str(path)
-
-def crear_respaldo(destino=None):
-    """
-    Crea respaldo JSON + copia .db.
-    Si destino apunta a una carpeta sincronizada de Google Drive Desktop,
-    Drive lo subirá automáticamente.
-    """
-    destino = Path(destino or get_config("backup_folder", str(BACKUP_DIR)))
-    destino.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    tablas = ["usuarios", "categorias", "productos", "cotizaciones", "pedidos", "creditos", "abonos", "configuracion"]
-    data = {}
-    for t in tablas:
-        try:
-            df = pd.read_sql_query(f"SELECT * FROM {t}", get_conn())
-            data[t] = df.to_dict(orient="records")
-        except Exception as e:
-            data[t] = {"error": str(e)}
-
-    json_path = destino / f"backup_insumos_mayor_{stamp}.json"
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-    db_path = destino / f"backup_insumos_mayor_{stamp}.db"
-    try:
-        shutil.copy2(DB_NAME, db_path)
-    except Exception:
-        db_path = None
-
-    set_config("backup_ultima_fecha", datetime.now().strftime("%Y-%m-%d"))
-    return str(json_path), str(db_path) if db_path else ""
-
-
-def importar_respaldo_json(uploaded_file, modo="fusionar"):
-    """
-    Importa un respaldo JSON generado por crear_respaldo.
-    modo='fusionar': inserta/actualiza por claves naturales cuando aplica.
-    modo='reemplazar': limpia tablas comerciales antes de importar.
-    """
-    if uploaded_file is None:
-        return False, "No se seleccionó archivo."
-
-    data = json.load(uploaded_file)
-
-    tablas = ["categorias", "usuarios", "productos", "cotizaciones", "pedidos", "creditos", "abonos", "configuracion"]
-
-    if modo == "reemplazar":
-        for t in ["abonos", "creditos", "pedidos", "cotizaciones", "productos", "categorias"]:
-            try:
-                q(f"DELETE FROM {t}")
-            except Exception:
-                pass
-        # usuarios y configuración se fusionan para no bloquear acceso admin.
-
-    contadores = {}
-    for tabla in tablas:
-        rows = data.get(tabla, [])
-        if not isinstance(rows, list):
-            continue
-        contadores[tabla] = 0
-        for row in rows:
-            if not isinstance(row, dict) or not row:
-                continue
-            cols = list(row.keys())
-            vals = [row[c] for c in cols]
-            placeholders = ",".join(["?"] * len(cols))
-            col_sql = ",".join(cols)
-            update_sql = ",".join([f"{c}=excluded.{c}" for c in cols])
-
-            # INSERT OR REPLACE sería peligroso con ids; usamos ON CONFLICT si la tabla tiene PK compatible.
-            try:
-                if tabla == "usuarios" and "username" in row:
-                    sql = f"INSERT INTO {tabla} ({col_sql}) VALUES ({placeholders}) ON CONFLICT(username) DO UPDATE SET {update_sql}"
-                elif tabla == "productos" and "sku" in row:
-                    sql = f"INSERT INTO {tabla} ({col_sql}) VALUES ({placeholders}) ON CONFLICT(sku) DO UPDATE SET {update_sql}"
-                elif tabla == "categorias" and "nombre" in row:
-                    sql = f"INSERT INTO {tabla} ({col_sql}) VALUES ({placeholders}) ON CONFLICT(nombre) DO UPDATE SET {update_sql}"
-                elif tabla == "configuracion" and "clave" in row:
-                    sql = f"INSERT INTO {tabla} ({col_sql}) VALUES ({placeholders}) ON CONFLICT(clave) DO UPDATE SET {update_sql}"
-                elif "id" in row:
-                    sql = f"INSERT OR REPLACE INTO {tabla} ({col_sql}) VALUES ({placeholders})"
-                else:
-                    sql = f"INSERT INTO {tabla} ({col_sql}) VALUES ({placeholders})"
-                q(sql, vals)
-                contadores[tabla] += 1
-            except Exception as e:
-                # Sigue con los demás registros para no abortar todo por una fila vieja.
-                pass
-
-    return True, "Importación completada: " + ", ".join([f"{k}: {v}" for k, v in contadores.items()])
-
-def exportar_json_actual():
-    destino = BACKUP_DIR
-    json_path, db_path = crear_respaldo(destino)
-    with open(json_path, "rb") as f:
-        content = f.read()
-    return content, Path(json_path).name
-
-def backup_auto_si_corresponde():
-    if get_config("backup_auto_diario", "1") != "1":
-        return
-    hoy = datetime.now().strftime("%Y-%m-%d")
-    if get_config("backup_ultima_fecha", "") != hoy:
-        try:
-            crear_respaldo()
-        except Exception:
-            pass
-
-def usuarios_visibles_para(user):
-    if user["rol"] == "admin":
-        rows = q("SELECT username FROM usuarios", fetch=True)
-        return [r["username"] for r in rows]
-    return [user["username"]]
-
-def crear_pedido_desde_carrito(user, carrito, tipo_pago, metodo_pago, envio_usd, notas, cliente_extra=None):
-    if not carrito:
-        return None, "Carrito vacío."
-
-    ok_stock, stock_msgs = validar_stock_carrito_woocommerce(carrito)
-    if not ok_stock:
-        return None, "No se puede crear pedido por stock insuficiente:\n" + "\n".join(stock_msgs)
-
-    t = calcular_carrito(carrito)
-    subtotal = float(t["subtotal"])
-    total = subtotal + float(envio_usd or 0)
-    tasa = get_tasa_proveedor()
-    cliente_extra = cliente_extra or {}
-
-    username = user["username"]
-    cliente_nombre = cliente_extra.get("cliente_nombre") or user["nombre"] or username
-    cliente_rif = cliente_extra.get("cliente_rif") or user["rif"] or ""
-    cliente_tel = cliente_extra.get("cliente_telefono") or user["telefono"] or ""
-    cliente_dir = cliente_extra.get("cliente_direccion") or user["direccion"] or ""
-
-    q("""INSERT INTO pedidos
-         (fecha, username, cliente_nombre, cliente_rif, cliente_telefono, cliente_direccion, items,
-          tipo_pago, metodo_pago, subtotal_usd, envio_usd, total_usd, tasa_proveedor,
-          total_bs_proveedor, peso_total_kg, status, notas)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-      (now(), username, cliente_nombre, cliente_rif, cliente_tel, cliente_dir, json.dumps(carrito, ensure_ascii=False),
-       tipo_pago, metodo_pago, subtotal, float(envio_usd or 0), total, tasa, total*tasa, t["peso_total_kg"],
-       "Crédito / Pendiente de pago" if tipo_pago == "credito" else "Pendiente de pago", notas))
-    pedido_id = q("SELECT last_insert_rowid() AS id", fetch=True)[0]["id"]
-
-    credito_id = None
-    if tipo_pago == "credito":
-        dias = int(user["dias_credito"] or parse_float(get_config("dias_credito_default", "10"), 10))
-        venc = (datetime.now() + timedelta(days=dias)).strftime("%d/%m/%Y")
-        q("""INSERT INTO creditos
-             (pedido_id, username, cliente_nombre, fecha_inicio, fecha_vencimiento, monto_usd, saldo_usd, tasa_proveedor, status, notas)
-             VALUES (?,?,?,?,?,?,?,?,?,?)""",
-          (pedido_id, username, cliente_nombre, now(), venc, total, total, tasa, "Pendiente", "Crédito creado desde pedido."))
-        credito_id = q("SELECT last_insert_rowid() AS id", fetch=True)[0]["id"]
-        q("UPDATE pedidos SET credito_id=?, status='Crédito / Pendiente de pago' WHERE id=?", (credito_id, pedido_id))
-    else:
-        q("UPDATE pedidos SET status='Pendiente de pago' WHERE id=?", (pedido_id,))
-
-    limpiar_carrito(username)
-    return pedido_id, "Pedido creado."
-
-def aplicar_abono_validado(abono_id, admin_username):
-    rows = q("SELECT * FROM abonos WHERE id=?", (abono_id,), fetch=True)
-    if not rows:
-        return False, "Abono no encontrado."
-    ab = rows[0]
-    if ab["status"] == "Validado":
-        return False, "El abono ya fue validado."
-
-    cr_rows = q("SELECT * FROM creditos WHERE id=?", (ab["credito_id"],), fetch=True)
-    if not cr_rows:
-        return False, "Crédito no encontrado."
-    cr = cr_rows[0]
-
-    nuevo_saldo = max(0.0, float(cr["saldo_usd"] or 0) - float(ab["monto_usd"] or 0))
-    nuevo_status = "Pagado" if nuevo_saldo <= 0.009 else "Parcial"
-    q("""UPDATE abonos SET status='Validado', validado_por=?, fecha_validacion=? WHERE id=?""",
-      (admin_username, now(), abono_id))
-    q("UPDATE creditos SET saldo_usd=?, status=? WHERE id=?", (nuevo_saldo, nuevo_status, cr["id"]))
-    if nuevo_status == "Pagado":
-        q("UPDATE pedidos SET status='Finalizado / Pagado' WHERE id=?", (cr["pedido_id"],))
-    else:
-        q("UPDATE pedidos SET status='Crédito / Pendiente de pago' WHERE id=?", (cr["pedido_id"],))
-    return True, f"Abono validado. Saldo actual: {money_usd(nuevo_saldo)}"
-
 
 def producto_precio_presentacion(prod, presentacion):
     if presentacion == "unidad":
@@ -3180,48 +2413,62 @@ def render_card_producto(prod, user):
     stock = int(prod["wc_stock"] or 0)
     disp = disponibilidad(prod)
     img = prod["wc_imagen_url"]
-    st.markdown('<div class="product-card">', unsafe_allow_html=True)
+
+    st.markdown('<div class="product-card-bubble">', unsafe_allow_html=True)
+
+    # Imagen + lupa compacta
+    st.markdown('<div class="product-card-image-zone">', unsafe_allow_html=True)
     img_col, zoom_col = st.columns([5, 1])
     with img_col:
         if img:
-            st.image(img, width=250)
+            st.image(img, width=230)
         else:
-            st.markdown("<div style='height:250px;width:250px;max-width:100%;border-radius:14px;background:#f3f4f6;display:flex;align-items:center;justify-content:center;font-size:50px'>📦</div>", unsafe_allow_html=True)
+            st.markdown("<div style='height:230px;width:230px;max-width:100%;border-radius:14px;background:#f3f4f6;display:flex;align-items:center;justify-content:center;font-size:50px'>📦</div>", unsafe_allow_html=True)
     with zoom_col:
         st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
         if st.button("🔍", key=f"zoom_{prod['sku']}", help="Ampliar imagen"):
             dialog_imagen(prod["descripcion"], prod["sku"], img)
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    st.markdown(f'<div class="product-title">{prod["descripcion"]}</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="muted">SKU: {prod["sku"]} · {categoria_nombre(prod["categoria_id"])}</div>', unsafe_allow_html=True)
-
-    if stock > 0 and prod["wc_stock_status"] != "outofstock":
-        st.markdown(f'<span class="badge badge-ok">Disponible: {stock} {prod["unidad_base"]}</span>', unsafe_allow_html=True)
+    # Título / stock
+    st.markdown('<div class="product-card-title-zone">', unsafe_allow_html=True)
+    st.markdown(f"<div class='product-card-title'>{prod['descripcion']}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='product-card-sku'>SKU: {prod['sku']} · {prod['categoria'] or 'Sin categoría'}</div>", unsafe_allow_html=True)
+    if stock > 0:
+        st.markdown(f"<span class='stock-pill'>Disponible: {stock} {prod['unidad_base']}</span>", unsafe_allow_html=True)
     else:
-        st.markdown('<span class="badge badge-no">Sin stock</span>', unsafe_allow_html=True)
-
+        st.markdown("<span class='stock-pill' style='background:#fee2e2;color:#991b1b'>Sin stock web</span>", unsafe_allow_html=True)
     st.caption(f"Docenas: {disp['docenas']} · Bultos: {disp['bultos']}")
+    st.markdown("</div>", unsafe_allow_html=True)
 
+    # Precios
+    st.markdown('<div class="product-card-price-zone">', unsafe_allow_html=True)
     st.markdown(f"<div class='price-main'>Unidad: {money_usd(prod['precio_unidad'])}</div>", unsafe_allow_html=True)
     st.markdown(f"<div class='price-bs'>{money_bs(float(prod['precio_unidad'] or 0) * tasa)}</div>", unsafe_allow_html=True)
 
     if int(prod["maneja_docena"] or 0):
-        st.markdown(f"<div class='muted'>Docena: <b>{money_usd(prod['precio_docena'])}</b> · {money_bs(float(prod['precio_docena'] or 0) * tasa)}</div>", unsafe_allow_html=True)
+        st.markdown(
+            f"<div class='muted'>Docena c/u: <b>{money_usd(prod['precio_docena'])}</b> · {money_bs(float(prod['precio_docena'] or 0) * tasa)}</div>",
+            unsafe_allow_html=True
+        )
+
     if int(prod["maneja_bulto"] or 0):
         bulto_contiene = int(prod["bulto_contiene"] or 1)
         precio_bulto_unitario = float(prod["precio_bulto"] or 0)
         total_bulto_usd = precio_bulto_unitario * bulto_contiene
         total_bulto_bs = total_bulto_usd * tasa
-
         st.markdown(
-            f"<div class='muted'>Bulto: <b>{money_usd(precio_bulto_unitario)}</b> c/u · {money_bs(precio_bulto_unitario * tasa)} c/u</div>",
+            f"<div class='muted'>Bulto c/u: <b>{money_usd(precio_bulto_unitario)}</b> · {money_bs(precio_bulto_unitario * tasa)}</div>",
             unsafe_allow_html=True
         )
         st.markdown(
             f"<div class='price-bs'>Bulto Total ({bulto_contiene} {prod['unidad_base']}): <b>{money_usd(total_bulto_usd)}</b> · <b>{money_bs(total_bulto_bs)}</b></div>",
             unsafe_allow_html=True
         )
+    st.markdown("</div>", unsafe_allow_html=True)
 
+    # MercadoLibre sugerido en zona reservada para mantener tamaño
+    st.markdown('<div class="product-card-ml-zone">', unsafe_allow_html=True)
     if user["rol"] in ["admin", "vendedor_mercadolibre"]:
         com_ml = get_comision_ml_pct()
         ml_u_bs, ml_u_bcv = precio_ml_resumen(prod["precio_unidad"])
@@ -3238,19 +2485,19 @@ def render_card_producto(prod, user):
             """,
             unsafe_allow_html=True
         )
+    st.markdown("</div>", unsafe_allow_html=True)
 
+    # Controles
+    st.markdown('<div class="product-card-controls-zone">', unsafe_allow_html=True)
     opciones = ["unidad"]
-    if int(prod["maneja_docena"] or 0):
+    if int(prod["maneja_docena"] or 0) and disp["docenas"] > 0:
         opciones.append("docena")
-    if int(prod["maneja_bulto"] or 0):
+    if int(prod["maneja_bulto"] or 0) and disp["bultos"] > 0:
         opciones.append("bulto")
 
     c1, c2 = st.columns([1.2, 1])
     presentacion = c1.selectbox("Presentación", opciones, key=f"pres_{prod['sku']}", label_visibility="collapsed")
 
-    # En tienda, docena y bulto son presentaciones cerradas.
-    # Se bloquea el campo para que "docena" sea 1 docena = 12 unidades
-    # y "bulto" sea 1 bulto = bulto_contiene unidades.
     if presentacion == "unidad":
         cantidad = c2.number_input("Cantidad", min_value=1, max_value=9999, value=1, step=1, key=f"cant_{prod['sku']}", label_visibility="collapsed")
     else:
@@ -3264,14 +2511,15 @@ def render_card_producto(prod, user):
     precio_total_calc = float(precio_calc["precio_total"])
     escala_aplicada = precio_calc["escala_aplicada"]
 
-    # Resumen de precio ya mostrado arriba.
-
     if unidades_base_total > stock:
         st.warning(f"No alcanza stock. Requiere {unidades_base_total}, disponible {stock}.")
         disabled = True
     else:
         disabled = False
+    st.markdown("</div>", unsafe_allow_html=True)
 
+    # Parte inferior siempre alineada
+    st.markdown('<div class="product-card-bottom-zone">', unsafe_allow_html=True)
     badge_col, add_col = st.columns([1.15, 1.35])
     with badge_col:
         show_producto_carrito_badge(user["username"], prod["sku"])
@@ -3310,8 +2558,9 @@ def render_card_producto(prod, user):
                 "success"
             )
             st.rerun()
-
     st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
 
 def tienda():
     st.title("🛍️ Tienda / Catálogo")
@@ -3372,21 +2621,8 @@ def tienda():
     sql += " ORDER BY c.orden, p.descripcion"
     rows = q(sql, params, fetch=True)
 
-    nav1, nav2, nav3 = st.columns([1, 2, 1])
-    current_idx = cat_names.index(cat_sel)
-    with nav1:
-        if st.button("⬅️ Categoría anterior", use_container_width=True, disabled=current_idx <= 0):
-            st.session_state["tienda_categoria"] = cat_names[current_idx - 1]
-            st.rerun()
-    with nav2:
-        show_categoria_banner(cat_sel, len(rows))
-    with nav3:
-        if st.button("Categoría siguiente ➡️", use_container_width=True, disabled=current_idx >= len(cat_names) - 1):
-            st.session_state["tienda_categoria"] = cat_names[current_idx + 1]
-            st.rerun()
-
     rinfo1, rinfo2 = st.columns([3, 1])
-    rinfo1.caption(f"{len(rows)} productos encontrados")
+    rinfo1.caption(f"{len(rows)} productos encontrados en {cat_sel}")
     if rinfo2.button("🔄 Actualizar stock", use_container_width=True):
         with st.spinner("Sincronizando WooCommerce..."):
             ok, no, errors = sync_todos_productos()
