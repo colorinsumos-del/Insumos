@@ -40,7 +40,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V2 Fix22 PDF Unicode"
+APP_NAME = "Sistema de Insumos al Mayor V2 Fix24 Burbuja Carrito"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -195,6 +195,65 @@ div[data-testid="stForm"] {
     background: transparent !important;
 }
 
+
+/* Burbuja ecommerce del carrito */
+.cart-bubble-box {
+    position: relative;
+    border: 1px solid #dbeafe;
+    background: linear-gradient(135deg, #eff6ff 0%, #ffffff 100%);
+    border-radius: 16px;
+    padding: 10px 12px;
+    min-height: 76px;
+    box-shadow: 0 2px 10px rgba(37, 99, 235, 0.08);
+}
+
+.cart-bubble-icon {
+    font-size: 1.45rem;
+    font-weight: 900;
+    color: #1d4ed8;
+    line-height: 1.1;
+}
+
+.cart-bubble-count {
+    position: absolute;
+    top: -9px;
+    right: -7px;
+    min-width: 26px;
+    height: 26px;
+    padding: 0 7px;
+    border-radius: 999px;
+    background: #ef4444;
+    color: white;
+    font-size: .78rem;
+    font-weight: 900;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 2px solid #ffffff;
+    box-shadow: 0 2px 8px rgba(239, 68, 68, 0.35);
+}
+
+.cart-bubble-muted {
+    color: #64748b;
+    font-size: .78rem;
+    font-weight: 600;
+}
+
+.cart-bubble-total {
+    color: #047857;
+    font-size: .95rem;
+    font-weight: 900;
+}
+
+.cart-bubble-last {
+    margin-top: 3px;
+    color: #334155;
+    font-size: .72rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -254,6 +313,82 @@ def carrito_resumen_texto(username: str):
     total_unidades = sum(int(i.get("unidades_base_total", 0) or 0) for i in carrito.values())
     total_usd = sum(float(i.get("precio_total", 0) or 0) for i in carrito.values())
     return len(carrito), total_unidades, total_usd
+
+def texto_agregado_presentacion(presentacion: str, cantidad_presentacion: int, unidades_base_total: int):
+    presentacion = str(presentacion or "unidad")
+    cantidad_presentacion = int(cantidad_presentacion or 1)
+    unidades_base_total = int(unidades_base_total or 0)
+
+    if presentacion == "unidad":
+        if unidades_base_total == 1:
+            return "1 unidad"
+        return f"{unidades_base_total} unidades"
+
+    if presentacion == "docena":
+        if cantidad_presentacion == 1:
+            return "1 docena"
+        return f"{cantidad_presentacion} docenas"
+
+    if presentacion == "bulto":
+        if cantidad_presentacion == 1:
+            return "1 bulto"
+        return f"{cantidad_presentacion} bultos"
+
+    return f"{cantidad_presentacion} {presentacion}"
+
+def set_last_cart_action(producto: str, presentacion: str, cantidad_presentacion: int, unidades_base_total: int):
+    st.session_state["_cart_last_added"] = {
+        "producto": str(producto or ""),
+        "presentacion": presentacion,
+        "cantidad_presentacion": int(cantidad_presentacion or 1),
+        "unidades_base_total": int(unidades_base_total or 0),
+        "texto": texto_agregado_presentacion(presentacion, cantidad_presentacion, unidades_base_total),
+    }
+
+def show_last_cart_action():
+    data = st.session_state.get("_cart_last_added")
+    if not data:
+        return
+    texto = data.get("texto", "")
+    producto = data.get("producto", "")
+    unidades = int(data.get("unidades_base_total", 0) or 0)
+    st.markdown(
+        f"""
+        <div style="margin: .35rem 0 1rem 0; padding: .75rem 1rem; border-radius: 12px;
+                    background: #ecfdf5; border: 1px solid #a7f3d0; color: #065f46;">
+            <div style="font-weight: 900; font-size: 1rem;">🛒 Agregado al carrito: {texto}</div>
+            <div style="font-size: .92rem; margin-top: 2px;">{producto} · {unidades} unidad(es) base</div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+def show_cart_bubble(username: str):
+    carrito = cargar_carrito(username)
+    n_items, n_unidades, total_usd = carrito_resumen_texto(username)
+    last = st.session_state.get("_cart_last_added") or {}
+    last_txt = last.get("texto", "")
+    last_prod = last.get("producto", "")
+
+    if last_txt and last_prod:
+        last_line = f"Último: {last_txt} · {last_prod}"
+    elif n_items:
+        last_line = "Listo para revisar pedido"
+    else:
+        last_line = "Sin productos agregados"
+
+    st.markdown(
+        f"""
+        <div class="cart-bubble-box">
+            <div class="cart-bubble-count">{n_items}</div>
+            <div class="cart-bubble-icon">🛒 Carrito</div>
+            <div class="cart-bubble-muted">{n_unidades} unidad(es) en total</div>
+            <div class="cart-bubble-total">{money_usd(total_usd)}</div>
+            <div class="cart-bubble-last">{last_line}</div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
 def hash_password(password: str) -> str:
     salt = secrets.token_hex(16)
@@ -3030,8 +3165,10 @@ def render_card_producto(prod, user):
         }
         guardar_carrito(user["username"], carrito)
         n_items, n_unidades, total_carrito = carrito_resumen_texto(user["username"])
+        set_last_cart_action(prod["descripcion"], presentacion, cantidad_presentacion, unidades_base_total)
+        agregado_txt = texto_agregado_presentacion(presentacion, cantidad_presentacion, unidades_base_total)
         set_feedback(
-            f"Agregado al carrito: {prod['descripcion']} · {unidades_base_total} unidad(es). "
+            f"Agregado al carrito: {agregado_txt}. "
             f"Carrito: {n_items} línea(s), {n_unidades} unidad(es), {money_usd(total_carrito)}.",
             "success"
         )
@@ -3041,6 +3178,7 @@ def render_card_producto(prod, user):
 
 def tienda():
     st.title("🛍️ Tienda / Catálogo")
+    show_last_cart_action()
     user = get_user(st.session_state.user["username"])
     tasa = get_tasa_proveedor()
     carrito = cargar_carrito(user["username"])
@@ -3062,20 +3200,14 @@ def tienda():
         bus = st.text_input("Buscar producto", placeholder="Buscar por nombre o SKU...", label_visibility="collapsed")
 
     with top3:
-        st.markdown(
-            f"""
-            <div style="font-size:.78rem;color:#6b7280;">Carrito</div>
-            <div style="font-size:1.05rem;font-weight:900;">{len(carrito)} línea(s)</div>
-            <div style="font-size:.78rem;color:#64748b;">{t['unidades_total']} unidad(es)</div>
-            <div style="font-size:.82rem;color:#047857;font-weight:800;">{money_usd(t['subtotal'])}</div>
-            """,
-            unsafe_allow_html=True
-        )
+        show_cart_bubble(user["username"])
 
     with top4:
         if st.button("🛒 Ver carrito", use_container_width=True):
             st.session_state.menu = "Carrito"
             st.rerun()
+        if carrito:
+            st.caption(f"{len(carrito)} línea(s) · {t['unidades_total']} unidad(es)")
 
     st.caption(f"Tasa proveedor: {tasa:,.2f} · Bolívares calculados a tasa proveedor vigente.")
     st.markdown("</div>", unsafe_allow_html=True)
@@ -3119,6 +3251,8 @@ def carrito_view():
     user = get_user(st.session_state.user["username"])
     carrito = cargar_carrito(user["username"])
     tasa = get_tasa_proveedor()
+
+    show_cart_bubble(user["username"])
 
     if not carrito:
         st.info("Tu carrito está vacío.")
@@ -3345,6 +3479,9 @@ with st.sidebar:
     try:
         _ci, _cu, _ct = carrito_resumen_texto(user["username"])
         st.caption(f"🛒 Carrito: {_ci} línea(s) · {_cu} unidad(es) · {money_usd(_ct)}")
+        _last = st.session_state.get("_cart_last_added")
+        if _last:
+            st.caption(f"Último agregado: {_last.get('texto','')} · {_last.get('producto','')}")
     except Exception:
         pass
     if st.button("Cerrar sesión", use_container_width=True):
