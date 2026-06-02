@@ -40,7 +40,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V2 Fix24 Burbuja Carrito"
+APP_NAME = "Sistema de Insumos al Mayor V2 Fix25 Carrito por Item"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -344,6 +344,69 @@ def set_last_cart_action(producto: str, presentacion: str, cantidad_presentacion
         "unidades_base_total": int(unidades_base_total or 0),
         "texto": texto_agregado_presentacion(presentacion, cantidad_presentacion, unidades_base_total),
     }
+
+def resumen_producto_en_carrito(username: str, sku: str):
+    carrito = cargar_carrito(username)
+    resumen = {
+        "lineas": 0,
+        "unidades": 0,
+        "unidad": 0,
+        "docena": 0,
+        "bulto": 0,
+        "total_usd": 0.0,
+    }
+    for item in carrito.values():
+        if item.get("sku") != sku:
+            continue
+        resumen["lineas"] += 1
+        resumen["unidades"] += int(item.get("unidades_base_total", 0) or 0)
+        resumen["total_usd"] += float(item.get("precio_total", 0) or 0)
+        pres = item.get("presentacion", "unidad")
+        cant = int(item.get("cantidad_presentacion", 0) or 0)
+        if pres in resumen:
+            resumen[pres] += cant
+    return resumen
+
+def texto_resumen_producto_en_carrito(resumen):
+    partes = []
+    if resumen.get("unidad", 0):
+        u = int(resumen["unidad"])
+        partes.append(f"{u} unidad" if u == 1 else f"{u} unidades")
+    if resumen.get("docena", 0):
+        d = int(resumen["docena"])
+        partes.append(f"{d} docena" if d == 1 else f"{d} docenas")
+    if resumen.get("bulto", 0):
+        b = int(resumen["bulto"])
+        partes.append(f"{b} bulto" if b == 1 else f"{b} bultos")
+    if not partes:
+        return ""
+    return " + ".join(partes)
+
+def show_producto_carrito_badge(username: str, sku: str):
+    resumen = resumen_producto_en_carrito(username, sku)
+    texto = texto_resumen_producto_en_carrito(resumen)
+    if not texto:
+        st.markdown(
+            """
+            <div style="border:1px dashed #cbd5e1;border-radius:10px;padding:7px 9px;
+                        color:#64748b;background:#f8fafc;font-size:.82rem;font-weight:700;text-align:center;">
+                🛒 No agregado
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+        return
+
+    st.markdown(
+        f"""
+        <div style="border:1px solid #bbf7d0;border-radius:10px;padding:7px 9px;
+                    color:#166534;background:#ecfdf5;font-size:.82rem;font-weight:900;text-align:center;">
+            🛒 En carrito: {texto}<br>
+            <span style="font-size:.76rem;color:#047857;">{resumen['unidades']} unidad(es) · {money_usd(resumen['total_usd'])}</span>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
 def show_last_cart_action():
     data = st.session_state.get("_cart_last_added")
@@ -3146,33 +3209,44 @@ def render_card_producto(prod, user):
     else:
         disabled = False
 
-    if st.button("🛒 Agregar", key=f"add_{prod['sku']}", type="primary", use_container_width=True, disabled=disabled):
-        carrito = cargar_carrito(user["username"])
-        key = f"{prod['sku']}::{presentacion}"
-        carrito[key] = {
-            "sku": prod["sku"],
-            "desc": prod["descripcion"],
-            "presentacion": presentacion,
-            "escala_aplicada": escala_aplicada,
-            "detalle_precio": precio_calc.get("detalle_precio", escala_aplicada),
-            "cantidad_presentacion": int(cantidad),
-            "equivalencia": int(eq),
-            "unidades_base_total": int(unidades_base_total),
-            "precio_presentacion": float(precio_pres),
-            "precio_total": precio_total_calc,
-            "peso_total_kg": float(prod["peso_unidad_kg"] or 0) * int(unidades_base_total),
-            "imagen_url": prod["wc_imagen_url"],
-        }
-        guardar_carrito(user["username"], carrito)
-        n_items, n_unidades, total_carrito = carrito_resumen_texto(user["username"])
-        set_last_cart_action(prod["descripcion"], presentacion, cantidad_presentacion, unidades_base_total)
-        agregado_txt = texto_agregado_presentacion(presentacion, cantidad_presentacion, unidades_base_total)
-        set_feedback(
-            f"Agregado al carrito: {agregado_txt}. "
-            f"Carrito: {n_items} línea(s), {n_unidades} unidad(es), {money_usd(total_carrito)}.",
-            "success"
-        )
-        st.rerun()
+    badge_col, add_col = st.columns([1.15, 1.35])
+    with badge_col:
+        show_producto_carrito_badge(user["username"], prod["sku"])
+
+    with add_col:
+        if st.button("🛒 Agregar", key=f"add_{prod['sku']}", type="primary", use_container_width=True, disabled=disabled):
+            carrito = cargar_carrito(user["username"])
+            key = f"{prod['sku']}::{presentacion}"
+            cantidad_final = int(cantidad)
+            if key in carrito:
+                cantidad_final = int(carrito[key].get("cantidad_presentacion", 0) or 0) + int(cantidad)
+
+            item_tmp = {
+                "sku": prod["sku"],
+                "desc": prod["descripcion"],
+                "presentacion": presentacion,
+                "escala_aplicada": escala_aplicada,
+                "detalle_precio": precio_calc.get("detalle_precio", escala_aplicada),
+                "cantidad_presentacion": cantidad_final,
+                "equivalencia": int(eq),
+                "unidades_base_total": int(unidades_base_total),
+                "precio_presentacion": float(precio_pres),
+                "precio_total": precio_total_calc,
+                "peso_total_kg": float(prod["peso_unidad_kg"] or 0) * int(unidades_base_total),
+                "imagen_url": prod["wc_imagen_url"],
+            }
+            carrito[key] = recalcular_item_carrito(item_tmp, cantidad_final)
+            guardar_carrito(user["username"], carrito)
+            n_items, n_unidades, total_carrito = carrito_resumen_texto(user["username"])
+            cantidad_presentacion_agregada = int(cantidad)
+            set_last_cart_action(prod["descripcion"], presentacion, cantidad_presentacion_agregada, unidades_base_total)
+            agregado_txt = texto_agregado_presentacion(presentacion, cantidad_presentacion_agregada, unidades_base_total)
+            set_feedback(
+                f"Agregado al carrito: {agregado_txt}. "
+                f"Carrito: {n_items} línea(s), {n_unidades} unidad(es), {money_usd(total_carrito)}.",
+                "success"
+            )
+            st.rerun()
 
     st.markdown("</div>", unsafe_allow_html=True)
 
