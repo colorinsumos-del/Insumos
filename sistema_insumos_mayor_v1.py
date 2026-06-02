@@ -40,7 +40,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V2 Fix25 Carrito por Item"
+APP_NAME = "Sistema de Insumos al Mayor V2 Fix25 Limpio"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -3187,12 +3187,6 @@ def render_card_producto(prod, user):
     else:
         cantidad = 1
         c2.number_input("Cantidad", min_value=1, max_value=1, value=1, step=1, key=f"cant_locked_{prod['sku']}_{presentacion}", label_visibility="collapsed", disabled=True)
-        st.caption(f"{presentacion.capitalize()} bloqueado: se agrega 1 {presentacion}. Puedes aumentar o bajar en el carrito con + / -.")
-
-    st.markdown(
-        f"<div class='muted'>{resumen_presentacion_catalogo(prod, presentacion, int(cantidad))}</div>",
-        unsafe_allow_html=True
-    )
 
     precio_calc = calcular_precio_inteligente(prod, presentacion, int(cantidad))
     precio_pres = float(precio_calc["precio_presentacion"])
