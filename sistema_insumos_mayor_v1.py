@@ -40,7 +40,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V2 Fix34 Horizontal Compacto"
+APP_NAME = "Sistema de Insumos al Mayor V2 Fix35 Foto Limpia"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -270,15 +270,11 @@ div[data-testid="stForm"] {
     box-shadow: 0 8px 24px rgba(37, 99, 235, 0.08);
 }
 
-.catalog-list-image {
+.catalog-image-frame {
     border: 1px solid #eef2f7;
     background: #fbfdff;
     border-radius: 14px;
     padding: 8px;
-    min-height: 150px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
 }
 
 .catalog-list-title {
@@ -3207,12 +3203,17 @@ def render_card_producto(prod, user):
     col_img, col_info, col_actions = st.columns([1.15, 3.15, 1.55], vertical_alignment="top")
 
     with col_img:
-        st.markdown('<div class="catalog-list-image">', unsafe_allow_html=True)
         if img:
-            st.image(img, width=145)
+            pad1, pad2, pad3 = st.columns([0.05, 0.90, 0.05])
+            with pad2:
+                st.image(img, width=175)
         else:
-            st.markdown("<div style='height:145px;width:145px;border-radius:12px;background:#f3f4f6;display:flex;align-items:center;justify-content:center;font-size:38px'>📦</div>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+            st.markdown(
+                "<div class='catalog-image-frame' style='height:175px;display:flex;align-items:center;justify-content:center;'>"
+                "<div style='height:145px;width:145px;border-radius:12px;background:#f3f4f6;display:flex;align-items:center;justify-content:center;font-size:38px'>📦</div>"
+                "</div>",
+                unsafe_allow_html=True
+            )
 
         if st.button("🔍 Ver imagen", key=f"zoom_{prod['sku']}", help="Ampliar imagen", use_container_width=True):
             dialog_imagen(prod["descripcion"], prod["sku"], img)
