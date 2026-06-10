@@ -40,7 +40,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V2 Fix38 Crédito BCV + Pack"
+APP_NAME = "Sistema de Insumos al Mayor V2 Fix39 Flujo Pago Bs"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -4052,11 +4052,61 @@ def carrito_view():
             envio_pedido = 0.0
             st.caption("Este cliente no tiene activa la casilla ML / ENVÍO, por eso no se muestra cobro de envío.")
 
+        total_preview_usd = float(t["subtotal"]) + float(envio_pedido or 0)
+        tasa_prov_preview = get_tasa_proveedor()
+        tasa_bcv_preview = get_tasa_bcv()
+        total_preview_bs = total_preview_usd * tasa_prov_preview
+
+        st.markdown("### Pasos antes de procesar")
+        if tipo_label == "Contado":
+            if metodo_pago in ["Transferencia", "Pago móvil"]:
+                st.info(
+                    f"Pago en Bs seleccionado.\n\n"
+                    f"1. Total del pedido: {money_usd(total_preview_usd)}.\n"
+                    f"2. Tasa proveedor actual: {tasa_prov_preview:,.2f}.\n"
+                    f"3. Cliente debe transferir: {money_bs(total_preview_bs)}.\n"
+                    f"4. Luego de confirmar el pago, procesa el pedido.\n\n"
+                    f"Importante: este pedido quedará como pendiente de pago hasta que el administrador lo valide o lo marque como finalizado."
+                )
+            elif metodo_pago in ["Divisas", "Zelle", "Zinli", "Binance"]:
+                st.info(
+                    f"Pago en divisas seleccionado.\n\n"
+                    f"1. Total del pedido: {money_usd(total_preview_usd)}.\n"
+                    f"2. El cliente debe cancelar ese monto por {metodo_pago}.\n"
+                    f"3. Luego de confirmar el pago, procesa el pedido."
+                )
+            else:
+                st.warning(
+                    "Selecciona el método de pago antes de crear el pedido. "
+                    "Así el sistema puede mostrar los pasos correctos al cliente."
+                )
+        else:
+            if credito_tipo_label == "Crédito BCV":
+                credito_bcv_preview = total_preview_bs / tasa_bcv_preview if tasa_bcv_preview else 0
+                st.info(
+                    f"Crédito BCV seleccionado.\n\n"
+                    f"1. Total real del pedido: {money_usd(total_preview_usd)}.\n"
+                    f"2. Total en Bs a tasa proveedor: {money_bs(total_preview_bs)}.\n"
+                    f"3. Tasa BCV actual: {tasa_bcv_preview:,.2f}.\n"
+                    f"4. Crédito generado: {money_usd(credito_bcv_preview)} BCV.\n\n"
+                    f"El cliente luego pagará sus abonos indicando cuánto desea pagar en $ BCV. "
+                    f"El sistema calculará los Bs a transferir según la tasa BCV vigente del día del pago."
+                )
+            else:
+                st.info(
+                    f"Crédito en divisas reales seleccionado.\n\n"
+                    f"1. Total del crédito: {money_usd(total_preview_usd)}.\n"
+                    f"2. Si paga en Bs, se calculará con tasa proveedor vigente al momento del pago.\n"
+                    f"3. Al crear el pedido se generará una cuenta por cobrar."
+                )
+
         notas_pedido = st.text_area("Notas del pedido")
         submit_pedido = st.form_submit_button("✅ Crear pedido", type="primary")
 
     if submit_pedido:
-        if tipo_label == "Crédito" and user["rol"] != "admin" and int(user["credito_habilitado"] or 0) != 1:
+        if metodo_pago == "Por confirmar":
+            st.error("Antes de crear el pedido debes seleccionar un método de pago.")
+        elif tipo_label == "Crédito" and user["rol"] != "admin" and int(user["credito_habilitado"] or 0) != 1:
             st.error("No puedes crear pedido a crédito porque tu usuario no tiene crédito habilitado.")
         else:
             tipo_pago = "credito" if tipo_label == "Crédito" else "contado"
