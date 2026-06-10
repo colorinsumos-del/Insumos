@@ -40,7 +40,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V2 Fix41 Flujo Crédito BCV Claro"
+APP_NAME = "Sistema de Insumos al Mayor V2 Fix42 Flujo Sin Form"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -4019,119 +4019,135 @@ def carrito_view():
     if "_credito_bcv_calc" not in st.session_state:
         st.session_state["_credito_bcv_calc"] = None
 
-    with st.form("form_preparar_pedido"):
-        tipo_operacion = st.radio(
-            "Tipo de operación",
-            ["Contado", "Crédito en divisas", "Crédito BCV"],
-            horizontal=True,
-            help="Selecciona el flujo exacto antes de crear el pedido."
+    # IMPORTANTE:
+    # Este bloque NO usa st.form porque Streamlit no actualiza los valores internos
+    # hasta presionar un botón del formulario. Eso impedía habilitar correctamente
+    # Calcular crédito BCV / Crear pedido.
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+
+    tipo_operacion = st.radio(
+        "Tipo de operación",
+        ["Contado", "Crédito en divisas", "Crédito BCV"],
+        horizontal=True,
+        help="Selecciona el flujo exacto antes de crear el pedido.",
+        key="tipo_operacion_pedido"
+    )
+
+    metodo_pago = st.selectbox(
+        "Método de pago",
+        ["Por confirmar", "Divisas", "Transferencia", "Pago móvil", "Zelle", "Zinli", "Binance", "Otro"],
+        key="metodo_pago_pedido"
+    )
+
+    if cliente_usa_ml_envio(user):
+        envio_pedido = st.number_input(
+            "Envío a cobrar USD",
+            min_value=0.0,
+            value=float(t["envio"]),
+            step=0.5,
+            key="envio_pedido_procesar"
         )
+    else:
+        envio_pedido = 0.0
+        st.caption("Este cliente no tiene activa la casilla ML / ENVÍO, por eso no se muestra cobro de envío.")
 
-        metodo_pago = st.selectbox(
-            "Método de pago",
-            ["Por confirmar", "Divisas", "Transferencia", "Pago móvil", "Zelle", "Zinli", "Binance", "Otro"]
-        )
+    notas_pedido = st.text_area("Notas del pedido", key="notas_pedido_procesar")
 
-        if cliente_usa_ml_envio(user):
-            envio_pedido = st.number_input(
-                "Envío a cobrar USD",
-                min_value=0.0,
-                value=float(t["envio"]),
-                step=0.5
-            )
-        else:
-            envio_pedido = 0.0
-            st.caption("Este cliente no tiene activa la casilla ML / ENVÍO, por eso no se muestra cobro de envío.")
+    total_preview_usd = float(t["subtotal"]) + float(envio_pedido or 0)
+    tasa_prov_preview = get_tasa_proveedor()
+    tasa_bcv_preview = get_tasa_bcv()
+    total_preview_bs = total_preview_usd * tasa_prov_preview
+    credito_bcv_preview = total_preview_bs / tasa_bcv_preview if tasa_bcv_preview else 0
 
-        notas_pedido = st.text_area("Notas del pedido")
+    metodo_ok = metodo_pago != "Por confirmar"
+    credito_habilitado_ok = not (
+        tipo_operacion in ["Crédito en divisas", "Crédito BCV"]
+        and user["rol"] != "admin"
+        and int(user["credito_habilitado"] or 0) != 1
+    )
 
-        total_preview_usd = float(t["subtotal"]) + float(envio_pedido or 0)
-        tasa_prov_preview = get_tasa_proveedor()
-        tasa_bcv_preview = get_tasa_bcv()
-        total_preview_bs = total_preview_usd * tasa_prov_preview
-        credito_bcv_preview = total_preview_bs / tasa_bcv_preview if tasa_bcv_preview else 0
+    st.markdown("### Revisión antes de continuar")
 
-        metodo_ok = metodo_pago != "Por confirmar"
-        credito_habilitado_ok = not (
-            tipo_operacion in ["Crédito en divisas", "Crédito BCV"]
-            and user["rol"] != "admin"
-            and int(user["credito_habilitado"] or 0) != 1
-        )
+    if not metodo_ok:
+        st.warning("Selecciona un método de pago para continuar.")
 
-        st.markdown("### Revisión antes de continuar")
-
-        if not metodo_ok:
-            st.warning("Selecciona un método de pago para continuar.")
-
-        if tipo_operacion == "Contado":
-            if metodo_pago in ["Transferencia", "Pago móvil"]:
-                st.info(
-                    f"Pago en Bs seleccionado.\n\n"
-                    f"Total del pedido: {money_usd(total_preview_usd)}\n\n"
-                    f"Tasa proveedor actual: {tasa_prov_preview:,.2f}\n\n"
-                    f"Cliente debe transferir: {money_bs(total_preview_bs)}"
-                )
-            elif metodo_pago in ["Divisas", "Zelle", "Zinli", "Binance"]:
-                st.info(
-                    f"Pago en divisas seleccionado.\n\n"
-                    f"Total a cancelar: {money_usd(total_preview_usd)} por {metodo_pago}."
-                )
-            elif metodo_pago == "Otro":
-                st.info(
-                    f"Método de pago Otro.\n\n"
-                    f"Total del pedido: {money_usd(total_preview_usd)}\n\n"
-                    f"Referencia en Bs a tasa proveedor: {money_bs(total_preview_bs)}"
-                )
-
-        elif tipo_operacion == "Crédito en divisas":
-            if not credito_habilitado_ok:
-                st.warning("Tu usuario no tiene crédito habilitado. El administrador debe activarlo.")
+    if tipo_operacion == "Contado":
+        if metodo_pago in ["Transferencia", "Pago móvil"]:
             st.info(
-                f"Crédito en divisas reales.\n\n"
-                f"Saldo que se generará: {money_usd(total_preview_usd)}\n\n"
-                f"Referencia en Bs hoy: {money_bs(total_preview_usd * tasa_prov_preview)}"
+                f"Pago en Bs seleccionado.\n\n"
+                f"Total del pedido: {money_usd(total_preview_usd)}\n\n"
+                f"Tasa proveedor actual: {tasa_prov_preview:,.2f}\n\n"
+                f"Cliente debe transferir: {money_bs(total_preview_bs)}"
             )
-
-        else:
-            if not credito_habilitado_ok:
-                st.warning("Tu usuario no tiene crédito habilitado. El administrador debe activarlo.")
-            st.warning(
-                "Crédito BCV requiere doble paso:\n\n"
-                "1. Presiona Calcular crédito BCV.\n\n"
-                "2. Revisa el monto generado.\n\n"
-                "3. Luego confirma con Crear pedido confirmado con Crédito BCV."
-            )
+        elif metodo_pago in ["Divisas", "Zelle", "Zinli", "Binance"]:
             st.info(
-                f"Vista previa del Crédito BCV:\n\n"
-                f"Total real USD: {money_usd(total_preview_usd)}\n\n"
-                f"Total Bs a tasa proveedor: {money_bs(total_preview_bs)}\n\n"
-                f"Tasa BCV actual: {tasa_bcv_preview:,.2f}\n\n"
-                f"Crédito estimado: {money_usd(credito_bcv_preview)} BCV"
+                f"Pago en divisas seleccionado.\n\n"
+                f"Total a cancelar: {money_usd(total_preview_usd)} por {metodo_pago}."
+            )
+        elif metodo_pago == "Otro":
+            st.info(
+                f"Método de pago Otro.\n\n"
+                f"Total del pedido: {money_usd(total_preview_usd)}\n\n"
+                f"Referencia en Bs a tasa proveedor: {money_bs(total_preview_bs)}"
             )
 
-        puede_calcular_bcv = (
-            tipo_operacion == "Crédito BCV"
-            and metodo_ok
-            and credito_habilitado_ok
-            and tasa_bcv_preview > 0
-        )
-        puede_crear_normal = (
-            tipo_operacion in ["Contado", "Crédito en divisas"]
-            and metodo_ok
-            and credito_habilitado_ok
+    elif tipo_operacion == "Crédito en divisas":
+        if not credito_habilitado_ok:
+            st.warning("Tu usuario no tiene crédito habilitado. El administrador debe activarlo.")
+        st.info(
+            f"Crédito en divisas reales.\n\n"
+            f"Saldo que se generará: {money_usd(total_preview_usd)}\n\n"
+            f"Referencia en Bs hoy: {money_bs(total_preview_usd * tasa_prov_preview)}"
         )
 
-        col_accion1, col_accion2 = st.columns(2)
-        calcular_bcv = col_accion1.form_submit_button(
-            "🧮 Calcular crédito BCV",
-            type="secondary",
-            disabled=not puede_calcular_bcv
+    else:
+        if not credito_habilitado_ok:
+            st.warning("Tu usuario no tiene crédito habilitado. El administrador debe activarlo.")
+        if tasa_bcv_preview <= 0:
+            st.error("La tasa BCV está en cero. Actualízala antes de calcular Crédito BCV.")
+        st.warning(
+            "Crédito BCV requiere doble paso:\n\n"
+            "1. Presiona Calcular crédito BCV.\n\n"
+            "2. Revisa el monto generado.\n\n"
+            "3. Luego confirma con Crear pedido confirmado con Crédito BCV."
         )
-        crear_pedido_normal = col_accion2.form_submit_button(
-            "✅ Crear pedido",
-            type="primary",
-            disabled=not puede_crear_normal
+        st.info(
+            f"Vista previa del Crédito BCV:\n\n"
+            f"Total real USD: {money_usd(total_preview_usd)}\n\n"
+            f"Total Bs a tasa proveedor: {money_bs(total_preview_bs)}\n\n"
+            f"Tasa BCV actual: {tasa_bcv_preview:,.2f}\n\n"
+            f"Crédito estimado: {money_usd(credito_bcv_preview)} BCV"
         )
+
+    puede_calcular_bcv = (
+        tipo_operacion == "Crédito BCV"
+        and metodo_ok
+        and credito_habilitado_ok
+        and tasa_bcv_preview > 0
+    )
+    puede_crear_normal = (
+        tipo_operacion in ["Contado", "Crédito en divisas"]
+        and metodo_ok
+        and credito_habilitado_ok
+    )
+
+    col_accion1, col_accion2 = st.columns(2)
+    calcular_bcv = col_accion1.button(
+        "🧮 Calcular crédito BCV",
+        type="secondary",
+        disabled=not puede_calcular_bcv,
+        use_container_width=True,
+        key="btn_calcular_credito_bcv"
+    )
+    crear_pedido_normal = col_accion2.button(
+        "✅ Crear pedido",
+        type="primary",
+        disabled=not puede_crear_normal,
+        use_container_width=True,
+        key="btn_crear_pedido_normal"
+    )
+
+    st.markdown("</div>", unsafe_allow_html=True)
 
     if calcular_bcv:
         st.session_state["_credito_bcv_calc"] = {
@@ -4187,7 +4203,7 @@ def carrito_view():
             )
 
             cc1, cc2 = st.columns(2)
-            if cc1.button("✅ Crear pedido confirmado con Crédito BCV", type="primary", use_container_width=True):
+            if cc1.button("✅ Crear pedido confirmado con Crédito BCV", type="primary", use_container_width=True, key="btn_confirmar_pedido_bcv"):
                 pid, msg = crear_pedido_desde_carrito(
                     user,
                     carrito,
@@ -4205,7 +4221,7 @@ def carrito_view():
                 else:
                     st.error(msg)
 
-            if cc2.button("Cancelar cálculo BCV", use_container_width=True):
+            if cc2.button("Cancelar cálculo BCV", use_container_width=True, key="btn_cancelar_calc_bcv"):
                 st.session_state["_credito_bcv_calc"] = None
                 st.rerun()
 
