@@ -40,7 +40,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V2 Fix42 Flujo Sin Form"
+APP_NAME = "Sistema de Insumos al Mayor V2 Fix43 Usuarios Perfil"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -739,6 +739,18 @@ def init_db():
     add_col("usuarios", "limite_credito_usd", "REAL DEFAULT 0")
     add_col("usuarios", "dias_credito", "INTEGER DEFAULT 10")
     add_col("usuarios", "ml_envio", "INTEGER DEFAULT 0")
+    add_col("usuarios", "id_usuario", "INTEGER DEFAULT 0")
+    add_col("usuarios", "email", "TEXT")
+    # Asignar id_usuario automático a usuarios existentes/importados que no lo tengan.
+    rows_sin_id = q("SELECT username FROM usuarios WHERE COALESCE(id_usuario,0)=0 ORDER BY creado_en, username", fetch=True)
+    if rows_sin_id:
+        max_row = q("SELECT COALESCE(MAX(id_usuario),0) AS m FROM usuarios", fetch=True)[0]
+        next_id = int(max_row["m"] or 0) + 1
+        for _u in rows_sin_id:
+            q("UPDATE usuarios SET id_usuario=? WHERE username=?", (next_id, _u["username"]))
+            next_id += 1
+    # Compatibilidad: si email está vacío, usar username cuando parezca correo.
+    q("UPDATE usuarios SET email=username WHERE (email IS NULL OR email='') AND username LIKE '%@%'")
     add_col("productos", "costo_proveedor_unitario", "REAL DEFAULT 0")
     add_col("productos", "envio_costo_bulto", "REAL DEFAULT 0")
     add_col("productos", "otros_costos_bulto", "REAL DEFAULT 0")
@@ -1179,6 +1191,97 @@ def guardar_carrito(username, data):
 def limpiar_carrito(username):
     q("DELETE FROM carritos WHERE username=?", (username,))
 
+
+def usuario_siguiente_id():
+    row = q("SELECT COALESCE(MAX(id_usuario),0) AS m FROM usuarios", fetch=True)[0]
+    return int(row["m"] or 0) + 1
+
+def username_existe(username, excluir_username=None):
+    username = (username or "").strip()
+    if not username:
+        return False
+    if excluir_username:
+        rows = q("SELECT username FROM usuarios WHERE username=? AND username<>?", (username, excluir_username), fetch=True)
+    else:
+        rows = q("SELECT username FROM usuarios WHERE username=?", (username,), fetch=True)
+    return bool(rows)
+
+def email_existe(email, excluir_username=None):
+    email = (email or "").strip()
+    if not email:
+        return False
+    if excluir_username:
+        rows = q("SELECT username FROM usuarios WHERE email=? AND username<>?", (email, excluir_username), fetch=True)
+    else:
+        rows = q("SELECT username FROM usuarios WHERE email=?", (email,), fetch=True)
+    return bool(rows)
+
+def actualizar_referencias_username(username_old, username_new):
+    """Actualiza referencias históricas cuando admin cambia el username."""
+    username_old = (username_old or "").strip()
+    username_new = (username_new or "").strip()
+    if not username_old or not username_new or username_old == username_new:
+        return
+    tablas = ["pedidos", "creditos", "abonos", "cotizaciones", "carritos"]
+    for tabla in tablas:
+        try:
+            q(f"UPDATE {tabla} SET username=? WHERE username=?", (username_new, username_old))
+        except Exception:
+            pass
+    try:
+        q("UPDATE productos_vendedores SET vendedor_username=? WHERE vendedor_username=?", (username_new, username_old))
+    except Exception:
+        pass
+    # Si el usuario editado es el que está conectado, refrescar sesión.
+    try:
+        if st.session_state.user and st.session_state.user.get("username") == username_old:
+            st.session_state.user["username"] = username_new
+    except Exception:
+        pass
+
+def crear_usuario_admin(username, password, nombre, rol, telefono, rif, ciudad, direccion, email, credito_hab, ml_envio, limite, dias, activo):
+    username = (username or "").strip()
+    email = (email or "").strip()
+    if not username or not nombre:
+        return False, "Usuario y nombre son obligatorios."
+    if username_existe(username):
+        return False, "Ese usuario ya existe. Usa Actualizar usuario existente si deseas editarlo."
+    if email and email_existe(email):
+        return False, "Ese correo ya está usado por otro usuario."
+    q("""INSERT INTO usuarios
+         (id_usuario,username,password_hash,nombre,rol,telefono,rif,ciudad,direccion,email,activo,tipo_precio,credito_habilitado,ml_envio,limite_credito_usd,dias_credito,creado_en)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+      (usuario_siguiente_id(), username, hash_password(password or "1234"), nombre, rol, telefono, rif, ciudad, direccion, email, 1 if activo else 0, "proveedor", 1 if credito_hab else 0, 1 if ml_envio else 0, limite, int(dias), now()))
+    return True, f"Usuario creado: {nombre} ({username})."
+
+def actualizar_usuario_admin(username_original, username_new, nombre, rol, telefono, rif, ciudad, direccion, email, credito_hab, ml_envio, limite, dias, activo, password=""):
+    username_original = (username_original or "").strip()
+    username_new = (username_new or "").strip()
+    email = (email or "").strip()
+    if not username_original:
+        return False, "Selecciona un usuario existente para actualizar."
+    if not username_new or not nombre:
+        return False, "Usuario y nombre son obligatorios."
+    if username_new != username_original and username_existe(username_new, excluir_username=username_original):
+        return False, "El nuevo username ya existe en otro usuario."
+    if email and email_existe(email, excluir_username=username_original):
+        return False, "Ese correo ya está usado por otro usuario."
+
+    if username_new != username_original:
+        q("UPDATE usuarios SET username=? WHERE username=?", (username_new, username_original))
+        actualizar_referencias_username(username_original, username_new)
+
+    if password:
+        q("""UPDATE usuarios SET password_hash=?, nombre=?, rol=?, telefono=?, rif=?, ciudad=?, direccion=?, email=?,
+             credito_habilitado=?, ml_envio=?, limite_credito_usd=?, dias_credito=?, activo=? WHERE username=?""",
+          (hash_password(password), nombre, rol, telefono, rif, ciudad, direccion, email,
+           1 if credito_hab else 0, 1 if ml_envio else 0, limite, int(dias), 1 if activo else 0, username_new))
+    else:
+        q("""UPDATE usuarios SET nombre=?, rol=?, telefono=?, rif=?, ciudad=?, direccion=?, email=?,
+             credito_habilitado=?, ml_envio=?, limite_credito_usd=?, dias_credito=?, activo=? WHERE username=?""",
+          (nombre, rol, telefono, rif, ciudad, direccion, email,
+           1 if credito_hab else 0, 1 if ml_envio else 0, limite, int(dias), 1 if activo else 0, username_new))
+    return True, f"Usuario actualizado: {nombre} ({username_new})."
 
 def save_uploaded_file(uploaded, folder: Path, prefix="file"):
     if uploaded is None:
@@ -2404,12 +2507,67 @@ def admin_productos():
                     st.success("Producto eliminado.")
                     st.rerun()
 
+def mi_perfil():
+    st.title("👤 Mi perfil")
+    user_actual = get_user(st.session_state.user["username"])
+    if not user_actual:
+        st.error("No se pudo cargar tu perfil. Cierra sesión e inicia nuevamente.")
+        return
+
+    st.caption("Actualiza tus datos de contacto y entrega. El usuario, rol y condiciones de crédito solo puede cambiarlos el administrador.")
+
+    with st.form("form_mi_perfil"):
+        c1, c2 = st.columns(2)
+        nombre = c1.text_input("Nombre / razón social", value=user_actual["nombre"] or "")
+        email = c2.text_input("Correo", value=(user_actual["email"] if "email" in user_actual.keys() and user_actual["email"] else ""))
+
+        c3, c4, c5 = st.columns(3)
+        telefono = c3.text_input("Teléfono", value=user_actual["telefono"] or "")
+        rif = c4.text_input("RIF / CI", value=user_actual["rif"] or "")
+        ciudad = c5.text_input("Ciudad", value=user_actual["ciudad"] or "")
+
+        direccion = st.text_area("Dirección fiscal / entrega", value=user_actual["direccion"] or "")
+        password = st.text_input("Cambiar contraseña", type="password", help="Déjalo vacío si no deseas cambiarla.")
+
+        st.info(
+            f"Usuario de acceso: {user_actual['username']}\n\n"
+            f"Rol: {user_actual['rol']}\n\n"
+            "Para cambiar usuario, rol, crédito, límite o días de crédito, contacta al administrador."
+        )
+
+        submit = st.form_submit_button("💾 Guardar mi perfil", type="primary")
+
+    if submit:
+        if not nombre.strip():
+            st.error("El nombre / razón social no puede quedar vacío.")
+            return
+        if email and email_existe(email, excluir_username=user_actual["username"]):
+            st.error("Ese correo ya está usado por otro usuario.")
+            return
+
+        if password:
+            q("""UPDATE usuarios SET nombre=?, email=?, telefono=?, rif=?, ciudad=?, direccion=?, password_hash=? WHERE username=?""",
+              (nombre, email, telefono, rif, ciudad, direccion, hash_password(password), user_actual["username"]))
+        else:
+            q("""UPDATE usuarios SET nombre=?, email=?, telefono=?, rif=?, ciudad=?, direccion=? WHERE username=?""",
+              (nombre, email, telefono, rif, ciudad, direccion, user_actual["username"]))
+
+        refreshed = get_user(user_actual["username"])
+        if refreshed:
+            st.session_state.user = dict(refreshed)
+        set_feedback("Perfil actualizado correctamente.", "success")
+        st.rerun()
+
+
 def admin_usuarios():
     st.title("👥 Usuarios / Clientes")
-    tab1, tab2 = st.tabs(["Listado", "Crear / Editar"])
+    tab1, tab2 = st.tabs(["Listado / Cliente 360", "Crear / Editar"])
 
     with tab1:
-        df = pd.read_sql_query("SELECT username,nombre,rol,telefono,rif,ciudad,activo,credito_habilitado,ml_envio,limite_credito_usd,dias_credito FROM usuarios ORDER BY rol,nombre", get_conn())
+        df = pd.read_sql_query(
+            "SELECT id_usuario,username,email,nombre,rol,telefono,rif,ciudad,activo,credito_habilitado,ml_envio,limite_credito_usd,dias_credito FROM usuarios ORDER BY rol,nombre",
+            get_conn()
+        )
         st.dataframe(df, use_container_width=True, hide_index=True)
 
         st.subheader("Examinar cliente")
@@ -2479,59 +2637,74 @@ def admin_usuarios():
                     st.error("No puedes eliminar tu propio usuario activo.")
                 else:
                     q("DELETE FROM usuarios WHERE username=?", (username_sel,))
+                    q("DELETE FROM carritos WHERE username=?", (username_sel,))
                     st.success("Usuario eliminado.")
                     st.rerun()
 
     with tab2:
-        usuarios = q("SELECT username,nombre FROM usuarios ORDER BY nombre", fetch=True)
-        opciones = ["Crear nuevo"] + [f"{u['nombre'] or u['username']} — {u['username']}" for u in usuarios]
-        mapa = {f"{u['nombre'] or u['username']} — {u['username']}": u["username"] for u in usuarios}
-        sel_edit = st.selectbox("Seleccionar usuario para editar", opciones)
-        edit_row = None
-        if sel_edit != "Crear nuevo":
-            edit_row = get_user(mapa[sel_edit])
+        st.caption("Usa botones separados para crear o actualizar. Esto evita duplicar usuarios al editar correo o username.")
+        modo = st.radio("Acción", ["Crear usuario nuevo", "Actualizar usuario existente"], horizontal=True)
 
-        with st.form("crear_editar_usuario"):
+        usuarios = q("SELECT username,nombre FROM usuarios ORDER BY nombre", fetch=True)
+        edit_row = None
+        username_original = ""
+
+        if modo == "Actualizar usuario existente":
+            if not usuarios:
+                st.info("No hay usuarios para editar.")
+                return
+            opciones = [f"{u['nombre'] or u['username']} — {u['username']}" for u in usuarios]
+            mapa = {f"{u['nombre'] or u['username']} — {u['username']}": u["username"] for u in usuarios}
+            sel_edit = st.selectbox("Seleccionar usuario para editar", opciones)
+            username_original = mapa[sel_edit]
+            edit_row = get_user(username_original)
+            if edit_row:
+                st.info(f"Editando usuario existente: {edit_row['nombre'] or edit_row['username']} · ID interno: {edit_row['id_usuario'] if 'id_usuario' in edit_row.keys() else 'N/A'}")
+        else:
+            st.info("Creando usuario nuevo. Si quieres cambiar datos de alguien existente, usa Actualizar usuario existente.")
+
+        with st.form("crear_editar_usuario_v43"):
             c1, c2, c3 = st.columns(3)
-            username = c1.text_input("Correo / usuario", value=edit_row["username"] if edit_row else "")
-            nombre = c2.text_input("Nombre", value=edit_row["nombre"] if edit_row else "")
+            username = c1.text_input("Usuario / login", value=edit_row["username"] if edit_row else "", help="Solo admin puede cambiarlo. Si cambia, se actualizarán pedidos, créditos, cotizaciones y carrito asociados.")
+            email = c2.text_input("Correo", value=(edit_row["email"] if edit_row and "email" in edit_row.keys() and edit_row["email"] else ""))
+            nombre = c3.text_input("Nombre / razón social", value=edit_row["nombre"] if edit_row else "")
+
             rol_default = edit_row["rol"] if edit_row and edit_row["rol"] in ["comprador", "vendedor", "vendedor_mercadolibre", "admin"] else "comprador"
-            rol = c3.selectbox("Rol", ["comprador", "vendedor", "vendedor_mercadolibre", "admin"], index=["comprador","vendedor","vendedor_mercadolibre","admin"].index(rol_default))
             c4, c5, c6 = st.columns(3)
-            telefono = c4.text_input("Teléfono", value=edit_row["telefono"] if edit_row else "")
-            rif = c5.text_input("RIF / CI", value=edit_row["rif"] if edit_row else "")
-            ciudad = c6.text_input("Ciudad", value=edit_row["ciudad"] if edit_row else "")
+            rol = c4.selectbox("Rol", ["comprador", "vendedor", "vendedor_mercadolibre", "admin"], index=["comprador","vendedor","vendedor_mercadolibre","admin"].index(rol_default))
+            telefono = c5.text_input("Teléfono", value=edit_row["telefono"] if edit_row else "")
+            rif = c6.text_input("RIF / CI", value=edit_row["rif"] if edit_row else "")
+
+            ciudad = st.text_input("Ciudad", value=edit_row["ciudad"] if edit_row else "")
             direccion = st.text_area("Dirección", value=edit_row["direccion"] if edit_row else "")
+
             c7, c8, c9, c10 = st.columns(4)
             credito_hab = c7.checkbox("Crédito habilitado", value=bool(edit_row["credito_habilitado"]) if edit_row else False)
             ml_envio = c8.checkbox("ML / ENVÍO", value=bool(edit_row["ml_envio"]) if edit_row else False, help="Activa cálculo sugerido de envío por peso para clientes MercadoLibre o fuera del estado.")
             limite = c9.number_input("Límite crédito USD", min_value=0.0, value=float(edit_row["limite_credito_usd"] if edit_row else 0), step=1.0)
             dias = c10.number_input("Días crédito", min_value=1, max_value=90, value=int(edit_row["dias_credito"] if edit_row else parse_float(get_config("dias_credito_default","10"), 10)))
             activo = st.checkbox("Activo", value=bool(edit_row["activo"]) if edit_row else True)
-            password = st.text_input("Contraseña nueva / inicial", type="password", help="Déjala vacía para conservar la actual si estás editando.")
-            submit = st.form_submit_button("💾 Guardar usuario", type="primary")
+            password = st.text_input("Contraseña nueva / inicial", type="password", help="Déjala vacía para conservar la actual si estás editando. En usuarios nuevos, si la dejas vacía será 1234.")
 
-        if submit:
-            if not username.strip() or not nombre.strip():
-                st.error("Usuario y nombre son obligatorios.")
-            else:
-                existing = get_user(username.strip())
-                if existing and not password:
-                    q("""UPDATE usuarios SET nombre=?, rol=?, telefono=?, rif=?, ciudad=?, direccion=?,
-                         credito_habilitado=?, ml_envio=?, limite_credito_usd=?, dias_credito=?, activo=? WHERE username=?""",
-                      (nombre, rol, telefono, rif, ciudad, direccion, 1 if credito_hab else 0, 1 if ml_envio else 0, limite, int(dias), 1 if activo else 0, username.strip()))
-                else:
-                    q("""INSERT INTO usuarios
-                         (username,password_hash,nombre,rol,telefono,rif,ciudad,direccion,activo,tipo_precio,credito_habilitado,ml_envio,limite_credito_usd,dias_credito,creado_en)
-                         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                         ON CONFLICT(username) DO UPDATE SET nombre=excluded.nombre, rol=excluded.rol,
-                         password_hash=excluded.password_hash, telefono=excluded.telefono, rif=excluded.rif,
-                         ciudad=excluded.ciudad, direccion=excluded.direccion, activo=excluded.activo,
-                         credito_habilitado=excluded.credito_habilitado, ml_envio=excluded.ml_envio,
-                         limite_credito_usd=excluded.limite_credito_usd, dias_credito=excluded.dias_credito""",
-                      (username.strip(), hash_password(password or "1234"), nombre, rol, telefono, rif, ciudad, direccion, 1 if activo else 0, "proveedor", 1 if credito_hab else 0, 1 if ml_envio else 0, limite, int(dias), now()))
-                set_feedback(f"Usuario guardado correctamente: {nombre} ({username.strip()}).", "success")
+            cbtn1, cbtn2 = st.columns(2)
+            submit_create = cbtn1.form_submit_button("➕ Crear usuario nuevo", type="primary", disabled=(modo != "Crear usuario nuevo"))
+            submit_update = cbtn2.form_submit_button("💾 Actualizar usuario existente", type="primary", disabled=(modo != "Actualizar usuario existente"))
+
+        if submit_create:
+            ok, msg = crear_usuario_admin(username, password, nombre, rol, telefono, rif, ciudad, direccion, email, credito_hab, ml_envio, limite, dias, activo)
+            if ok:
+                set_feedback(msg, "success")
                 st.rerun()
+            else:
+                st.error(msg)
+
+        if submit_update:
+            ok, msg = actualizar_usuario_admin(username_original, username, nombre, rol, telefono, rif, ciudad, direccion, email, credito_hab, ml_envio, limite, dias, activo, password)
+            if ok:
+                set_feedback(msg, "success")
+                st.rerun()
+            else:
+                st.error(msg)
 
 
 def admin_cotizaciones():
@@ -4309,7 +4482,7 @@ with st.sidebar:
     st.caption(f"{user['rol']} · {user['username']}")
     st.markdown("---")
 
-    opciones = ["Tienda", "Carrito", "Mis pedidos", "Mis créditos"]
+    opciones = ["Tienda", "Carrito", "Mis pedidos", "Mis créditos", "Mi perfil"]
     if user["rol"] == "admin":
         opciones += ["Dashboard", "Control POS", "Rentabilidad", "Publicaciones", "Vendedores", "Productos", "Categorías", "Cotizaciones", "Usuarios", "Validar créditos", "Reportes", "Configuración", "Respaldo"]
     elif user["rol"] == "vendedor":
@@ -4346,6 +4519,8 @@ elif menu == "Mis pedidos":
     mis_pedidos()
 elif menu == "Mis créditos":
     mis_creditos()
+elif menu == "Mi perfil":
+    mi_perfil()
 elif menu == "Dashboard":
     dashboard_admin()
 elif menu == "Control POS":
