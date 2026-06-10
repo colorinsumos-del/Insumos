@@ -40,7 +40,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V2 Fix36 Gestión Comercial"
+APP_NAME = "Sistema de Insumos al Mayor V2 Fix38 Crédito BCV + Pack"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -758,6 +758,27 @@ def init_db():
     add_col("pedidos", "pos_usuario", "TEXT")
     add_col("pedidos", "pos_notas", "TEXT")
 
+    # Fix38: Crédito BCV + presentación intermedia flexible
+    add_col("productos", "presentacion_intermedia_nombre", "TEXT DEFAULT 'Docena'")
+    add_col("productos", "presentacion_intermedia_cantidad", "INTEGER DEFAULT 12")
+
+    add_col("pedidos", "tasa_bcv", "REAL DEFAULT 0")
+    add_col("pedidos", "credito_tipo", "TEXT DEFAULT 'usd'")
+    add_col("pedidos", "total_bcv_credito", "REAL DEFAULT 0")
+
+    add_col("creditos", "tipo_credito", "TEXT DEFAULT 'usd'")
+    add_col("creditos", "tasa_bcv_creacion", "REAL DEFAULT 0")
+    add_col("creditos", "monto_bcv", "REAL DEFAULT 0")
+    add_col("creditos", "saldo_bcv", "REAL DEFAULT 0")
+    add_col("creditos", "total_bs_base", "REAL DEFAULT 0")
+
+    add_col("abonos", "tipo_credito", "TEXT DEFAULT 'usd'")
+    add_col("abonos", "monto_bcv", "REAL DEFAULT 0")
+    add_col("abonos", "tasa_bcv", "REAL DEFAULT 0")
+    add_col("abonos", "monto_bs_esperado", "REAL DEFAULT 0")
+
+    set_default("stock_auto_sync_minutos", "60")
+
     # Categorías iniciales:
     # Se crean una sola vez. Antes se recreaban en cada arranque si el admin las borraba.
     categorias_flag = q("SELECT valor FROM configuracion WHERE clave='categorias_iniciales_creadas'", fetch=True)
@@ -1284,7 +1305,7 @@ def usuarios_visibles_para(user):
         return [r["username"] for r in rows]
     return [user["username"]]
 
-def crear_pedido_desde_carrito(user, carrito, tipo_pago, metodo_pago, envio_usd, notas, cliente_extra=None):
+def crear_pedido_desde_carrito(user, carrito, tipo_pago, metodo_pago, envio_usd, notas, cliente_extra=None, tipo_credito="usd"):
     if not carrito:
         return None, "Carrito vacío."
 
@@ -1296,6 +1317,7 @@ def crear_pedido_desde_carrito(user, carrito, tipo_pago, metodo_pago, envio_usd,
     subtotal = float(t["subtotal"])
     total = subtotal + float(envio_usd or 0)
     tasa = get_tasa_proveedor()
+    tasa_bcv = get_tasa_bcv()
     cliente_extra = cliente_extra or {}
 
     username = user["username"]
@@ -1304,24 +1326,51 @@ def crear_pedido_desde_carrito(user, carrito, tipo_pago, metodo_pago, envio_usd,
     cliente_tel = cliente_extra.get("cliente_telefono") or user["telefono"] or ""
     cliente_dir = cliente_extra.get("cliente_direccion") or user["direccion"] or ""
 
+    credito_tipo = "bcv" if tipo_pago == "credito" and str(tipo_credito).lower() == "bcv" else "usd"
+    total_bs_base = total * tasa
+    total_bcv_credito = (total_bs_base / tasa_bcv) if credito_tipo == "bcv" and tasa_bcv > 0 else 0.0
+
+    if credito_tipo == "bcv" and tasa_bcv <= 0:
+        return None, "No se puede crear Crédito BCV porque la tasa BCV está en cero. Actualiza la tasa BCV primero."
+
     q("""INSERT INTO pedidos
          (fecha, username, cliente_nombre, cliente_rif, cliente_telefono, cliente_direccion, items,
-          tipo_pago, metodo_pago, subtotal_usd, envio_usd, total_usd, tasa_proveedor,
-          total_bs_proveedor, peso_total_kg, status, notas)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+          tipo_pago, metodo_pago, subtotal_usd, envio_usd, total_usd, tasa_proveedor, tasa_bcv,
+          total_bs_proveedor, peso_total_kg, status, notas, credito_tipo, total_bcv_credito)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
       (now(), username, cliente_nombre, cliente_rif, cliente_tel, cliente_dir, json.dumps(carrito, ensure_ascii=False),
-       tipo_pago, metodo_pago, subtotal, float(envio_usd or 0), total, tasa, total*tasa, t["peso_total_kg"],
-       "Crédito / Pendiente de pago" if tipo_pago == "credito" else "Pendiente de pago", notas))
+       tipo_pago, metodo_pago, subtotal, float(envio_usd or 0), total, tasa, tasa_bcv,
+       total_bs_base, t["peso_total_kg"],
+       "Crédito / Pendiente de pago" if tipo_pago == "credito" else "Pendiente de pago",
+       notas, credito_tipo, total_bcv_credito))
     pedido_id = q("SELECT last_insert_rowid() AS id", fetch=True)[0]["id"]
 
     credito_id = None
     if tipo_pago == "credito":
         dias = int(user["dias_credito"] or parse_float(get_config("dias_credito_default", "10"), 10))
         venc = (datetime.now() + timedelta(days=dias)).strftime("%d/%m/%Y")
-        q("""INSERT INTO creditos
-             (pedido_id, username, cliente_nombre, fecha_inicio, fecha_vencimiento, monto_usd, saldo_usd, tasa_proveedor, status, notas)
-             VALUES (?,?,?,?,?,?,?,?,?,?)""",
-          (pedido_id, username, cliente_nombre, now(), venc, total, total, tasa, "Pendiente", "Crédito creado desde pedido."))
+        if credito_tipo == "bcv":
+            nota_credito = (
+                "Crédito BCV creado desde pedido. "
+                "El saldo se expresa en $ BCV y se cancela en bolívares a la tasa BCV vigente del día en que se registre cada pago."
+            )
+            q("""INSERT INTO creditos
+                 (pedido_id, username, cliente_nombre, fecha_inicio, fecha_vencimiento,
+                  monto_usd, saldo_usd, tasa_proveedor, status, notas,
+                  tipo_credito, tasa_bcv_creacion, monto_bcv, saldo_bcv, total_bs_base)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+              (pedido_id, username, cliente_nombre, now(), venc,
+               total_bcv_credito, total_bcv_credito, tasa, "Pendiente", nota_credito,
+               "bcv", tasa_bcv, total_bcv_credito, total_bcv_credito, total_bs_base))
+        else:
+            q("""INSERT INTO creditos
+                 (pedido_id, username, cliente_nombre, fecha_inicio, fecha_vencimiento,
+                  monto_usd, saldo_usd, tasa_proveedor, status, notas,
+                  tipo_credito, tasa_bcv_creacion, monto_bcv, saldo_bcv, total_bs_base)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+              (pedido_id, username, cliente_nombre, now(), venc,
+               total, total, tasa, "Pendiente", "Crédito creado desde pedido.",
+               "usd", tasa_bcv, 0, 0, total_bs_base))
         credito_id = q("SELECT last_insert_rowid() AS id", fetch=True)[0]["id"]
         q("UPDATE pedidos SET credito_id=?, status='Crédito / Pendiente de pago' WHERE id=?", (credito_id, pedido_id))
     else:
@@ -1343,6 +1392,21 @@ def aplicar_abono_validado(abono_id, admin_username):
         return False, "Crédito no encontrado."
     cr = cr_rows[0]
 
+    tipo = str(cr["tipo_credito"] if "tipo_credito" in cr.keys() and cr["tipo_credito"] else "usd").lower()
+    if tipo == "bcv":
+        abono_bcv = float(ab["monto_bcv"] or ab["monto_usd"] or 0)
+        nuevo_saldo_bcv = max(0.0, float(cr["saldo_bcv"] or cr["saldo_usd"] or 0) - abono_bcv)
+        nuevo_status = "Pagado" if nuevo_saldo_bcv <= 0.009 else "Parcial"
+        q("""UPDATE abonos SET status='Validado', validado_por=?, fecha_validacion=? WHERE id=?""",
+          (admin_username, now(), abono_id))
+        q("UPDATE creditos SET saldo_bcv=?, saldo_usd=?, status=? WHERE id=?",
+          (nuevo_saldo_bcv, nuevo_saldo_bcv, nuevo_status, cr["id"]))
+        if nuevo_status == "Pagado":
+            q("UPDATE pedidos SET status='Finalizado / Pagado' WHERE id=?", (cr["pedido_id"],))
+        else:
+            q("UPDATE pedidos SET status='Crédito / Pendiente de pago' WHERE id=?", (cr["pedido_id"],))
+        return True, f"Abono BCV validado. Saldo actual: {money_usd(nuevo_saldo_bcv)} BCV"
+
     nuevo_saldo = max(0.0, float(cr["saldo_usd"] or 0) - float(ab["monto_usd"] or 0))
     nuevo_status = "Pagado" if nuevo_saldo <= 0.009 else "Parcial"
     q("""UPDATE abonos SET status='Validado', validado_por=?, fecha_validacion=? WHERE id=?""",
@@ -1359,52 +1423,41 @@ def producto_precio_presentacion(prod, presentacion):
     if presentacion == "unidad":
         return float(prod["precio_unidad"] or 0), 1
     if presentacion == "docena":
-        # precio_docena es precio unitario dentro de la docena.
-        return float(prod["precio_docena"] or 0) * 12, 12
+        # Campo histórico precio_docena ahora funciona como precio unitario de la presentación intermedia.
+        cantidad_intermedia = producto_intermedia_cantidad(prod)
+        return float(prod["precio_docena"] or 0) * cantidad_intermedia, cantidad_intermedia
     if presentacion == "bulto":
-        # precio_bulto es precio unitario dentro del bulto.
         bulto_contiene = int(prod["bulto_contiene"] or 1)
         return float(prod["precio_bulto"] or 0) * bulto_contiene, bulto_contiene
     return float(prod["precio_unidad"] or 0), 1
 
 def calcular_precio_inteligente(prod, presentacion, cantidad_presentacion):
-    """
-    Calcula el precio final de forma inteligente.
-
-    Caso clave:
-    - Si el usuario elige unidad y coloca 12, aplica precio docena.
-    - Si el usuario elige unidad y coloca la cantidad del bulto, aplica precio bulto.
-    - Si coloca cantidades mayores, combina bultos + docenas + unidades.
-
-    Ejemplo:
-    bulto=50, cantidad unidades=62
-    => 1 bulto + 1 docena = precio_bulto + precio_docena
-
-    Si el usuario elige docena o bulto explícitamente, respeta esa presentación.
-    """
     cantidad_presentacion = int(cantidad_presentacion or 1)
     precio_unidad = float(prod["precio_unidad"] or 0)
-    precio_docena = float(prod["precio_docena"] or 0)
+    precio_intermedia = float(prod["precio_docena"] or 0)
     precio_bulto = float(prod["precio_bulto"] or 0)
-    maneja_docena = bool(int(prod["maneja_docena"] or 0))
+    maneja_intermedia = bool(int(prod["maneja_docena"] or 0))
     maneja_bulto = bool(int(prod["maneja_bulto"] or 0))
+    intermedia_cant = producto_intermedia_cantidad(prod)
+    intermedia_nombre = producto_intermedia_nombre(prod)
     bulto_contiene = max(1, int(prod["bulto_contiene"] or 1))
 
     precio_pres, equivalencia = producto_precio_presentacion(prod, presentacion)
     unidades_base_total = cantidad_presentacion * int(equivalencia)
 
-    # Si el usuario eligió docena o bulto, se respeta esa selección.
     if presentacion != "unidad":
+        nombre = intermedia_nombre if presentacion == "docena" else presentacion
         return {
             "precio_total": precio_pres * cantidad_presentacion,
             "unidades_base_total": unidades_base_total,
             "precio_presentacion": precio_pres,
             "equivalencia": equivalencia,
-            "escala_aplicada": presentacion,
-            "detalle_precio": f"{cantidad_presentacion} {presentacion}(s)",
+            "escala_aplicada": nombre.lower(),
+            "detalle_precio": f"{cantidad_presentacion} {nombre}(s)",
+            "presentacion_nombre": nombre,
+            "presentacion_label": f"{nombre} x{equivalencia}",
         }
 
-    # Precio inteligente solo cuando el usuario compra en unidades.
     restante = unidades_base_total
     total = 0.0
     partes = []
@@ -1415,12 +1468,11 @@ def calcular_precio_inteligente(prod, presentacion, cantidad_presentacion):
         restante -= n_bultos * bulto_contiene
         partes.append(f"{n_bultos} bulto(s)")
 
-    if maneja_docena and precio_docena > 0 and restante >= 12:
-        n_docenas = restante // 12
-        # precio_docena es precio unitario dentro de la docena.
-        total += n_docenas * precio_docena * 12
-        restante -= n_docenas * 12
-        partes.append(f"{n_docenas} docena(s)")
+    if maneja_intermedia and precio_intermedia > 0 and restante >= intermedia_cant:
+        n_inter = restante // intermedia_cant
+        total += n_inter * precio_intermedia * intermedia_cant
+        restante -= n_inter * intermedia_cant
+        partes.append(f"{n_inter} {intermedia_nombre.lower()}(s)")
 
     if restante > 0:
         total += restante * precio_unidad
@@ -1436,14 +1488,17 @@ def calcular_precio_inteligente(prod, presentacion, cantidad_presentacion):
         "equivalencia": 1,
         "escala_aplicada": escala,
         "detalle_precio": escala,
+        "presentacion_nombre": "Unidad",
+        "presentacion_label": "Unidad",
     }
 
 def disponibilidad(prod):
     stock = int(prod["wc_stock"] or 0)
     bulto_contiene = int(prod["bulto_contiene"] or 1)
+    intermedia_cant = producto_intermedia_cantidad(prod)
     return {
         "unidades": stock,
-        "docenas": stock // 12,
+        "docenas": stock // intermedia_cant if intermedia_cant > 0 and int(prod["maneja_docena"] or 0) else 0,
         "bultos": stock // bulto_contiene if bulto_contiene > 0 and int(prod["maneja_bulto"] or 0) else 0,
         "resto_bulto": stock % bulto_contiene if bulto_contiene > 0 and int(prod["maneja_bulto"] or 0) else stock,
     }
@@ -1482,6 +1537,80 @@ def cliente_usa_ml_envio(user):
     except Exception:
         return False
 
+
+def producto_intermedia_nombre(prod):
+    """Nombre comercial de la presentación intermedia: Docena, Pack, Caja, Paquete."""
+    try:
+        nombre = prod["presentacion_intermedia_nombre"]
+    except Exception:
+        nombre = None
+    nombre = str(nombre or "Docena").strip()
+    return nombre if nombre else "Docena"
+
+def producto_intermedia_cantidad(prod):
+    """Cantidad de unidades base de la presentación intermedia."""
+    try:
+        val = int(prod["presentacion_intermedia_cantidad"] or 12)
+    except Exception:
+        val = 12
+    return max(1, val)
+
+def producto_intermedia_label(prod):
+    return f"{producto_intermedia_nombre(prod)} x{producto_intermedia_cantidad(prod)}"
+
+def presentacion_display_item(item):
+    p = str(item.get("presentacion", "unidad"))
+    if p == "docena":
+        return item.get("presentacion_nombre") or item.get("presentacion_label") or "Docena"
+    if p == "bulto":
+        return "Bulto"
+    return "Unidad"
+
+def money_credito(cr, campo="saldo"):
+    tipo = str(cr["tipo_credito"] if "tipo_credito" in cr.keys() and cr["tipo_credito"] else "usd").lower()
+    if tipo == "bcv":
+        valor = float(cr["saldo_bcv"] if campo == "saldo" else cr["monto_bcv"] or 0)
+        return f"{money_usd(valor)} BCV"
+    valor = float(cr["saldo_usd"] if campo == "saldo" else cr["monto_usd"] or 0)
+    return money_usd(valor)
+
+def credito_bs_hoy(cr):
+    tipo = str(cr["tipo_credito"] if "tipo_credito" in cr.keys() and cr["tipo_credito"] else "usd").lower()
+    if tipo == "bcv":
+        return float(cr["saldo_bcv"] or 0) * get_tasa_bcv()
+    return float(cr["saldo_usd"] or 0) * get_tasa_proveedor()
+
+def auto_sync_stock_si_corresponde():
+    """Sincroniza stock automáticamente con WooCommerce al entrar, respetando intervalo mínimo."""
+    if not wc_ready():
+        return
+    try:
+        minutos = int(parse_float(get_config("stock_auto_sync_minutos", "60"), 60))
+    except Exception:
+        minutos = 60
+    if minutos <= 0:
+        return
+    clave = "stock_auto_sync_ultima"
+    ultima = get_config(clave, "")
+    debe = True
+    try:
+        if ultima:
+            dt = datetime.strptime(ultima, "%Y-%m-%d %H:%M:%S")
+            debe = (datetime.now() - dt).total_seconds() >= minutos * 60
+    except Exception:
+        debe = True
+    # Solo una vez por sesión para no poner lenta la app con cada rerun.
+    if st.session_state.get("_auto_stock_sync_done") == ultima and ultima:
+        debe = False
+    if debe:
+        try:
+            ok, no, errors = sync_todos_productos()
+            set_config(clave, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            st.session_state["_auto_stock_sync_done"] = get_config(clave, "")
+            st.session_state["_auto_stock_sync_msg"] = f"Stock actualizado automáticamente: {ok} sincronizados."
+        except Exception as e:
+            st.session_state["_auto_stock_sync_msg"] = f"No se pudo actualizar stock automáticamente: {e}"
+
 def get_producto_row(sku):
     rows = q("SELECT * FROM productos WHERE sku=?", (sku,), fetch=True)
     return rows[0] if rows else None
@@ -1508,29 +1637,29 @@ def recalcular_item_carrito(item, nueva_cantidad=None):
     item["precio_total"] = float(precio_calc["precio_total"])
     item["escala_aplicada"] = precio_calc["escala_aplicada"]
     item["detalle_precio"] = precio_calc.get("detalle_precio", precio_calc["escala_aplicada"])
+    item["presentacion_nombre"] = precio_calc.get("presentacion_nombre", producto_intermedia_nombre(prod) if presentacion == "docena" else presentacion.title())
+    item["presentacion_label"] = precio_calc.get("presentacion_label", producto_intermedia_label(prod) if presentacion == "docena" else presentacion.title())
     item["peso_total_kg"] = float(prod["peso_unidad_kg"] or 0) * int(precio_calc["unidades_base_total"])
     item["imagen_url"] = prod["wc_imagen_url"]
     item["desc"] = prod["descripcion"]
     return item
 
 def texto_linea_carrito(item):
-    """
-    Texto comercial correcto para el carrito.
-    """
     presentacion = item.get("presentacion", "unidad")
     cantidad = int(item.get("cantidad_presentacion", 1))
     unidades = int(item.get("unidades_base_total", cantidad))
     escala = item.get("escala_aplicada", presentacion)
     precio_total = float(item.get("precio_total", 0) or 0)
+    nombre = presentacion_display_item(item)
 
     if presentacion == "unidad":
         return f"{unidades} unidad(es) · Precio aplicado: {escala}"
 
     if cantidad == 1:
-        return f"1 {presentacion} = {unidades} unidad(es) · Total {presentacion}: {money_usd(precio_total)}"
+        return f"1 {nombre} = {unidades} unidad(es) · Total {nombre}: {money_usd(precio_total)}"
 
     precio_pres = precio_total / cantidad if cantidad else 0
-    return f"{cantidad} {presentacion}(s) = {unidades} unidad(es) · {money_usd(precio_pres)} c/{presentacion}"
+    return f"{cantidad} {nombre}(s) = {unidades} unidad(es) · {money_usd(precio_pres)} c/{nombre}"
 
 
 def resumen_presentacion_catalogo(prod, presentacion, cantidad):
@@ -1546,6 +1675,7 @@ def resumen_presentacion_catalogo(prod, presentacion, cantidad):
 
 
 def formato_cantidad_pdf(item):
+    import re
     """
     Devuelve (cant, pres) para PDF sin contaminar SKU:
     - 1 a 11 unidades => cant = número, pres = und
@@ -1564,7 +1694,11 @@ def formato_cantidad_pdf(item):
         return cant, f"{unidades} und"
 
     if presentacion == "docena":
-        cant = "DOC" if cantidad_pres == 1 else f"DOC x{cantidad_pres}"
+        nombre = str(item.get("presentacion_nombre") or item.get("presentacion_label") or "DOC").upper()
+        nombre = nombre.split(" X")[0].strip()
+        if nombre == "DOCENA":
+            nombre = "DOC"
+        cant = nombre if cantidad_pres == 1 else f"{nombre} x{cantidad_pres}"
         return cant, f"{unidades} und"
 
     # Para unidad con precio inteligente: solo mostrar DOC/BULTO si la escala es cerrada y exacta.
@@ -1575,9 +1709,12 @@ def formato_cantidad_pdf(item):
             n = int(m.group(1))
         return ("BULTO" if n == 1 else f"BULTO x{n}"), f"{unidades} und"
 
-    if "docena" in escala and "+" not in escala and unidades % 12 == 0:
-        n = unidades // 12
-        return ("DOC" if n == 1 else f"DOC x{n}"), f"{unidades} und"
+    # Presentación intermedia por compra en unidades: docena, pack, caja, etc.
+    for palabra, etiqueta in [("docena", "DOC"), ("pack", "PACK"), ("caja", "CAJA"), ("paquete", "PAQ")]:
+        if palabra in escala and "+" not in escala:
+            m = re.search(r"(\d+)\s*" + palabra, escala)
+            n = int(m.group(1)) if m else 1
+            return (etiqueta if n == 1 else f"{etiqueta} x{n}"), f"{unidades} und"
 
     return str(unidades), "und"
 
@@ -1643,14 +1780,29 @@ def marcar_credito_pagado(credito_id, actor="admin"):
     if not rows:
         return False, "Crédito no encontrado."
     cr = rows[0]
-    saldo = float(cr["saldo_usd"] or 0)
-    if saldo > 0.009:
-        tasa = get_tasa_proveedor()
-        q("""INSERT INTO abonos
-             (credito_id,pedido_id,username,fecha,monto_usd,monto_bs,metodo,referencia,comprobante_path,status,validado_por,fecha_validacion,notas)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-          (cr["id"], cr["pedido_id"], cr["username"], now(), saldo, saldo*tasa, "Cierre administrativo", "CREDITO-PAGADO", None, "Validado", actor, now(), "Cierre manual de crédito como pagado."))
-    q("UPDATE creditos SET saldo_usd=0, status='Pagado' WHERE id=?", (int(credito_id),))
+    tipo = str(cr["tipo_credito"] if "tipo_credito" in cr.keys() and cr["tipo_credito"] else "usd").lower()
+    if tipo == "bcv":
+        saldo = float(cr["saldo_bcv"] or cr["saldo_usd"] or 0)
+        if saldo > 0.009:
+            tasa_bcv = get_tasa_bcv()
+            q("""INSERT INTO abonos
+                 (credito_id,pedido_id,username,fecha,monto_usd,monto_bs,metodo,referencia,comprobante_path,status,validado_por,fecha_validacion,notas,
+                  tipo_credito,monto_bcv,tasa_bcv,monto_bs_esperado)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+              (cr["id"], cr["pedido_id"], cr["username"], now(), saldo, saldo*tasa_bcv, "Cierre administrativo", "CREDITO-BCV-PAGADO", None, "Validado", actor, now(), "Cierre manual de crédito BCV como pagado.",
+               "bcv", saldo, tasa_bcv, saldo*tasa_bcv))
+        q("UPDATE creditos SET saldo_bcv=0, saldo_usd=0, status='Pagado' WHERE id=?", (int(credito_id),))
+    else:
+        saldo = float(cr["saldo_usd"] or 0)
+        if saldo > 0.009:
+            tasa = get_tasa_proveedor()
+            q("""INSERT INTO abonos
+                 (credito_id,pedido_id,username,fecha,monto_usd,monto_bs,metodo,referencia,comprobante_path,status,validado_por,fecha_validacion,notas,
+                  tipo_credito,monto_bcv,tasa_bcv,monto_bs_esperado)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+              (cr["id"], cr["pedido_id"], cr["username"], now(), saldo, saldo*tasa, "Cierre administrativo", "CREDITO-PAGADO", None, "Validado", actor, now(), "Cierre manual de crédito como pagado.",
+               "usd", 0, get_tasa_bcv(), saldo*tasa))
+        q("UPDATE creditos SET saldo_usd=0, status='Pagado' WHERE id=?", (int(credito_id),))
     q("UPDATE pedidos SET status='Finalizado / Pagado' WHERE id=?", (int(cr["pedido_id"]),))
     return True, "Crédito marcado como Pagado y pedido como Finalizado / Pagado."
 
@@ -1877,6 +2029,15 @@ def generar_pdf_pedido(pedido_id):
         pdf.cell(22, 7, money_usd(val), 1, 1, "R")
     pdf.set_font("Arial", "", 9)
     pdf.cell(190, 7, pdf_clean(f"Equivalente Bs proveedor: {money_bs(ped['total_bs_proveedor'])}"), ln=1, align="R")
+    try:
+        if str(ped["credito_tipo"] or "").lower() == "bcv":
+            pdf.ln(2)
+            pdf.set_font("Arial", "B", 9)
+            pdf.multi_cell(190, 5, pdf_clean("NOTA CREDITO BCV: Este credito se expresa en $ BCV. Cada abono se cancelara en bolivares a la tasa BCV vigente del dia en que el cliente registre el pago. La tasa BCV puede variar diariamente."))
+            pdf.set_font("Arial", "", 9)
+            pdf.cell(190, 6, pdf_clean(f"Monto credito BCV inicial: {money_usd(ped['total_bcv_credito'])} BCV | Tasa BCV creacion: {float(ped['tasa_bcv'] or 0):,.2f}"), ln=1)
+    except Exception:
+        pass
     if ped["notas"]:
         pdf.ln(3)
         pdf.multi_cell(190, 5, pdf_clean(f"Notas: {ped['notas']}"))
@@ -2003,6 +2164,7 @@ def admin_config():
             set_config("validez_cotizacion_dias", validez)
             set_config("envio_ml_10_40_usd", envio)
             set_config("comision_mercadolibre_pct", comision_ml)
+            set_config("stock_auto_sync_minutos", stock_auto_sync_minutos)
             st.success("Configuración guardada.")
 
     st.markdown("---")
@@ -2080,7 +2242,7 @@ def admin_productos():
             params.extend([f"%{bus}%", f"%{bus}%"])
         sql += " ORDER BY p.activo DESC, c.orden, p.descripcion"
         df = pd.read_sql_query(sql, get_conn(), params=params)
-        st.dataframe(df[["sku","descripcion","categoria","precio_unidad","precio_docena","precio_bulto","bulto_contiene","wc_stock","activo","ultima_sync"]], use_container_width=True, hide_index=True)
+        st.dataframe(df[["sku","descripcion","categoria","precio_unidad","presentacion_intermedia_nombre","presentacion_intermedia_cantidad","precio_docena","precio_bulto","bulto_contiene","wc_stock","activo","ultima_sync"]], use_container_width=True, hide_index=True)
 
     with tab_form:
         st.subheader("Crear o editar producto")
@@ -2106,17 +2268,25 @@ def admin_productos():
 
             c1, c2, c3 = st.columns(3)
             precio_unidad = c1.number_input("Precio unidad USD", min_value=0.0, value=float(prod["precio_unidad"] if prod else 0), step=0.01)
-            precio_docena = c2.number_input("Precio docena USD", min_value=0.0, value=float(prod["precio_docena"] if prod else 0), step=0.01)
-            precio_bulto = c3.number_input("Precio bulto USD", min_value=0.0, value=float(prod["precio_bulto"] if prod else 0), step=0.01)
+            precio_docena = c2.number_input("Precio presentación intermedia c/u USD", min_value=0.0, value=float(prod["precio_docena"] if prod else 0), step=0.01, help="Usa este campo para Docena, Pack x10, Caja, Paquete, etc. Es precio unitario dentro de esa presentación.")
+            precio_bulto = c3.number_input("Precio bulto c/u USD", min_value=0.0, value=float(prod["precio_bulto"] if prod else 0), step=0.01)
 
-            c4, c5, c6 = st.columns(3)
-            maneja_docena = c4.checkbox("Maneja docena", value=bool(prod["maneja_docena"]) if prod else True)
-            maneja_bulto = c5.checkbox("Maneja bulto", value=bool(prod["maneja_bulto"]) if prod else True)
-            bulto_contiene = c6.number_input("Bulto contiene unidades base", min_value=1, max_value=9999, value=int(prod["bulto_contiene"] if prod and prod["bulto_contiene"] else 1), step=1)
+            c4, c5, c6, c7 = st.columns(4)
+            maneja_docena = c4.checkbox("Maneja presentación intermedia", value=bool(prod["maneja_docena"]) if prod else True)
+            nombre_intermedio_actual = producto_intermedia_nombre(prod) if prod else "Docena"
+            opciones_intermedias = ["Docena", "Pack", "Caja", "Paquete"]
+            if nombre_intermedio_actual not in opciones_intermedias:
+                opciones_intermedias.append(nombre_intermedio_actual)
+            presentacion_intermedia_nombre = c5.selectbox("Nombre", opciones_intermedias, index=opciones_intermedias.index(nombre_intermedio_actual))
+            presentacion_intermedia_cantidad = c6.number_input("Contiene unidades", min_value=1, max_value=9999, value=producto_intermedia_cantidad(prod) if prod else 12, step=1)
+            maneja_bulto = c7.checkbox("Maneja bulto", value=bool(prod["maneja_bulto"]) if prod else True)
 
-            c7, c8 = st.columns(2)
-            peso = c7.number_input("Peso por unidad base KG (interno admin)", min_value=0.0, value=float(prod["peso_unidad_kg"] if prod else 0), step=0.01)
-            activo = c8.checkbox("Producto activo", value=bool(prod["activo"]) if prod else True)
+            c8, c9 = st.columns(2)
+            bulto_contiene = c8.number_input("Bulto contiene unidades base", min_value=1, max_value=9999, value=int(prod["bulto_contiene"] if prod and prod["bulto_contiene"] else 1), step=1)
+
+            c10, c11 = st.columns(2)
+            peso = c10.number_input("Peso por unidad base KG (interno admin)", min_value=0.0, value=float(prod["peso_unidad_kg"] if prod else 0), step=0.01)
+            activo = c11.checkbox("Producto activo", value=bool(prod["activo"]) if prod else True)
 
             st.markdown("#### Costos internos / rentabilidad")
             cc1, cc2, cc3, cc4 = st.columns(4)
@@ -2146,12 +2316,12 @@ def admin_productos():
                 cat_id = cat_options[cat_sel]
                 q("""INSERT INTO productos
                      (sku, descripcion, categoria_id, unidad_base, precio_unidad, precio_docena, precio_bulto,
-                      bulto_contiene, maneja_docena, maneja_bulto, peso_unidad_kg, activo,
+                      bulto_contiene, maneja_docena, maneja_bulto, presentacion_intermedia_nombre, presentacion_intermedia_cantidad, peso_unidad_kg, activo,
                       costo_proveedor_unitario, envio_costo_bulto, otros_costos_bulto, margen_minimo_pct,
                       pub_web, pub_instagram, pub_mercadolibre, pub_marketplace, pub_whatsapp,
                       link_instagram, link_mercadolibre, link_marketplace, notas_publicacion,
                       creado_en, actualizado_en)
-                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                      ON CONFLICT(sku) DO UPDATE SET
                      descripcion=excluded.descripcion,
                      categoria_id=excluded.categoria_id,
@@ -2162,6 +2332,8 @@ def admin_productos():
                      bulto_contiene=excluded.bulto_contiene,
                      maneja_docena=excluded.maneja_docena,
                      maneja_bulto=excluded.maneja_bulto,
+                     presentacion_intermedia_nombre=excluded.presentacion_intermedia_nombre,
+                     presentacion_intermedia_cantidad=excluded.presentacion_intermedia_cantidad,
                      peso_unidad_kg=excluded.peso_unidad_kg,
                      activo=excluded.activo,
                      costo_proveedor_unitario=excluded.costo_proveedor_unitario,
@@ -2179,7 +2351,7 @@ def admin_productos():
                      notas_publicacion=excluded.notas_publicacion,
                      actualizado_en=excluded.actualizado_en""",
                   (sku_e.strip(), desc.strip(), cat_id, unidad_base, precio_unidad, precio_docena, precio_bulto,
-                   int(bulto_contiene), 1 if maneja_docena else 0, 1 if maneja_bulto else 0,
+                   int(bulto_contiene), 1 if maneja_docena else 0, 1 if maneja_bulto else 0, presentacion_intermedia_nombre, int(presentacion_intermedia_cantidad),
                    peso, 1 if activo else 0,
                    costo_proveedor_unitario, envio_costo_bulto, otros_costos_bulto, margen_minimo_pct,
                    1 if pub_web else 0, 1 if pub_instagram else 0, 1 if pub_mercadolibre else 0, 1 if pub_marketplace else 0, 1 if pub_whatsapp else 0,
@@ -2644,35 +2816,89 @@ def mis_creditos():
     visibles = usuarios_visibles_para(user)
     placeholders = ",".join(["?"]*len(visibles))
     df = pd.read_sql_query(f"SELECT * FROM creditos WHERE username IN ({placeholders}) ORDER BY id DESC", get_conn(), params=visibles)
+    tasa_bcv = get_tasa_bcv()
+    tasa_prov = get_tasa_proveedor()
+
     if df.empty:
         st.info("Sin créditos registrados.")
     else:
-        st.dataframe(df[["id","pedido_id","cliente_nombre","fecha_vencimiento","monto_usd","saldo_usd","status"]], use_container_width=True, hide_index=True)
+        filas = []
+        for _, cr in df.iterrows():
+            tipo = str(cr.get("tipo_credito") or "usd").lower()
+            saldo = float(cr.get("saldo_bcv") or cr.get("saldo_usd") or 0) if tipo == "bcv" else float(cr.get("saldo_usd") or 0)
+            monto = float(cr.get("monto_bcv") or cr.get("monto_usd") or 0) if tipo == "bcv" else float(cr.get("monto_usd") or 0)
+            bs_hoy = saldo * (tasa_bcv if tipo == "bcv" else tasa_prov)
+            filas.append({
+                "id": int(cr["id"]),
+                "pedido_id": int(cr["pedido_id"]),
+                "cliente_nombre": cr["cliente_nombre"],
+                "tipo": "BCV" if tipo == "bcv" else "Divisas",
+                "monto": f"{money_usd(monto)} BCV" if tipo == "bcv" else money_usd(monto),
+                "saldo": f"{money_usd(saldo)} BCV" if tipo == "bcv" else money_usd(saldo),
+                "Bs a pagar hoy": money_bs(bs_hoy),
+                "status": cr["status"]
+            })
+        st.dataframe(pd.DataFrame(filas), use_container_width=True, hide_index=True)
 
     if user["rol"] != "admin":
-        creditos_pend = q("SELECT * FROM creditos WHERE username=? AND saldo_usd>0 ORDER BY id DESC", (user["username"],), fetch=True)
+        creditos_pend = q("SELECT * FROM creditos WHERE username=? AND COALESCE(saldo_usd,0)>0 ORDER BY id DESC", (user["username"],), fetch=True)
     else:
-        creditos_pend = q("SELECT * FROM creditos WHERE saldo_usd>0 ORDER BY id DESC", fetch=True)
+        creditos_pend = q("SELECT * FROM creditos WHERE COALESCE(saldo_usd,0)>0 ORDER BY id DESC", fetch=True)
 
     if creditos_pend:
         st.subheader("Cargar pago / abono")
-        opts = {f"Crédito #{c['id']} - {c['cliente_nombre']} - saldo {money_usd(c['saldo_usd'])}": c for c in creditos_pend}
+        def opt_label(c):
+            tipo = str(c["tipo_credito"] if "tipo_credito" in c.keys() and c["tipo_credito"] else "usd").lower()
+            saldo_txt = f"{money_usd(c['saldo_bcv'] or c['saldo_usd'])} BCV" if tipo == "bcv" else money_usd(c["saldo_usd"])
+            return f"Crédito #{c['id']} - {c['cliente_nombre']} - saldo {saldo_txt}"
+        opts = {opt_label(c): c for c in creditos_pend}
         sel = st.selectbox("Crédito", list(opts.keys()))
         cr = opts[sel]
+        tipo = str(cr["tipo_credito"] if "tipo_credito" in cr.keys() and cr["tipo_credito"] else "usd").lower()
+
         with st.form("form_abono"):
-            monto = st.number_input("Monto USD", min_value=0.01, max_value=float(cr["saldo_usd"] or 0), value=min(10.0, float(cr["saldo_usd"] or 0)), step=0.01)
-            metodo = st.text_input("Método de pago", value="Pago móvil / transferencia / divisas")
-            ref = st.text_input("Referencia")
-            comp = st.file_uploader("Comprobante", type=["jpg","jpeg","png","webp","pdf"])
-            notas = st.text_area("Notas")
-            submit = st.form_submit_button("Enviar pago para validar", type="primary")
+            if tipo == "bcv":
+                saldo_bcv = float(cr["saldo_bcv"] or cr["saldo_usd"] or 0)
+                monto_bcv = st.number_input("Monto a pagar en $ BCV", min_value=0.01, max_value=saldo_bcv, value=min(10.0, saldo_bcv), step=0.01)
+                tasa_actual = get_tasa_bcv()
+                monto_bs = monto_bcv * tasa_actual
+                st.info(f"Tasa BCV actual: {tasa_actual:,.2f}. Debes transferir: {money_bs(monto_bs)}")
+                metodo = st.text_input("Método de pago", value="Pago móvil / transferencia")
+                ref = st.text_input("Referencia")
+                comp = st.file_uploader("Comprobante", type=["jpg","jpeg","png","webp","pdf"])
+                notas = st.text_area("Notas")
+                submit = st.form_submit_button("Enviar pago BCV para validar", type="primary")
+            else:
+                monto = st.number_input("Monto USD real", min_value=0.01, max_value=float(cr["saldo_usd"] or 0), value=min(10.0, float(cr["saldo_usd"] or 0)), step=0.01)
+                tasa_actual = get_tasa_proveedor()
+                monto_bs = monto * tasa_actual
+                st.info(f"Tasa proveedor actual: {tasa_actual:,.2f}. Referencia en Bs: {money_bs(monto_bs)}")
+                metodo = st.text_input("Método de pago", value="Pago móvil / transferencia / divisas")
+                ref = st.text_input("Referencia")
+                comp = st.file_uploader("Comprobante", type=["jpg","jpeg","png","webp","pdf"])
+                notas = st.text_area("Notas")
+                submit = st.form_submit_button("Enviar pago para validar", type="primary")
+
         if submit:
             path = save_uploaded_file(comp, PAGOS_DIR, prefix=f"abono_credito_{cr['id']}")
-            tasa = get_tasa_proveedor()
-            q("""INSERT INTO abonos
-                 (credito_id,pedido_id,username,fecha,monto_usd,monto_bs,metodo,referencia,comprobante_path,status,notas)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-              (cr["id"], cr["pedido_id"], cr["username"], now(), monto, monto*tasa, metodo, ref, path, "Pendiente de validar", notas))
+            if tipo == "bcv":
+                tasa_actual = get_tasa_bcv()
+                monto_bcv = float(monto_bcv)
+                monto_bs = monto_bcv * tasa_actual
+                q("""INSERT INTO abonos
+                     (credito_id,pedido_id,username,fecha,monto_usd,monto_bs,metodo,referencia,comprobante_path,status,notas,
+                      tipo_credito,monto_bcv,tasa_bcv,monto_bs_esperado)
+                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                  (cr["id"], cr["pedido_id"], cr["username"], now(), monto_bcv, monto_bs, metodo, ref, path, "Pendiente de validar", notas,
+                   "bcv", monto_bcv, tasa_actual, monto_bs))
+            else:
+                tasa_actual = get_tasa_proveedor()
+                q("""INSERT INTO abonos
+                     (credito_id,pedido_id,username,fecha,monto_usd,monto_bs,metodo,referencia,comprobante_path,status,notas,
+                      tipo_credito,monto_bcv,tasa_bcv,monto_bs_esperado)
+                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                  (cr["id"], cr["pedido_id"], cr["username"], now(), monto, monto*tasa_actual, metodo, ref, path, "Pendiente de validar", notas,
+                   "usd", 0, get_tasa_bcv(), monto*tasa_actual))
             st.success("Pago cargado. Queda pendiente de validación.")
             st.rerun()
 
@@ -2691,10 +2917,12 @@ def validar_creditos():
         else:
             for _, cr in creditos.iterrows():
                 cid = int(cr["id"])
-                with st.expander(f"Crédito #{cid} | {cr['cliente_nombre']} | Saldo {money_usd(cr['saldo_usd'])} | {cr['status']}"):
+                tipo_cr_txt = "BCV" if str(cr.get("tipo_credito") or "usd").lower() == "bcv" else "Divisas"
+                saldo_cr_txt = f"{money_usd(cr.get('saldo_bcv') or cr.get('saldo_usd') or 0)} BCV" if tipo_cr_txt == "BCV" else money_usd(cr["saldo_usd"])
+                with st.expander(f"Crédito #{cid} | {cr['cliente_nombre']} | {tipo_cr_txt} | Saldo {saldo_cr_txt} | {cr['status']}"):
                     c1, c2, c3 = st.columns(3)
                     c1.write(f"Pedido: #{cr['pedido_id']}")
-                    c2.write(f"Monto: {money_usd(cr['monto_usd'])}")
+                    c2.write(f"Monto: {money_usd(cr.get('monto_bcv') or cr.get('monto_usd') or 0)} BCV" if tipo_cr_txt == "BCV" else f"Monto: {money_usd(cr['monto_usd'])}")
                     c3.write(f"Vence: {cr['fecha_vencimiento']}")
                     estados = ["Pendiente", "Parcial", "Pagado", "Vencido", "Anulado"]
                     idx = estados.index(cr["status"]) if cr["status"] in estados else 0
@@ -2713,7 +2941,10 @@ def validar_creditos():
                         st.rerun()
 
                     ab = pd.read_sql_query("SELECT * FROM abonos WHERE credito_id=? ORDER BY id DESC", get_conn(), params=(cid,))
-                    st.dataframe(ab[["id","fecha","monto_usd","metodo","referencia","status"]] if not ab.empty else ab, use_container_width=True, hide_index=True)
+                    if not ab.empty:
+                        st.dataframe(ab[["id","fecha","tipo_credito","monto_usd","monto_bcv","tasa_bcv","monto_bs","metodo","referencia","status"]], use_container_width=True, hide_index=True)
+                    else:
+                        st.dataframe(ab, use_container_width=True, hide_index=True)
 
                     confirmar = st.checkbox("Confirmar eliminación de este crédito y sus abonos", key=f"confirm_del_credito_{cid}")
                     if st.button("🗑️ Eliminar crédito", key=f"del_credito_{cid}", disabled=not confirmar, use_container_width=True):
@@ -2729,7 +2960,7 @@ def validar_creditos():
         if df.empty:
             st.success("No hay abonos pendientes.")
             return
-        st.dataframe(df[["id","credito_id","pedido_id","username","fecha","monto_usd","metodo","referencia","status"]], use_container_width=True, hide_index=True)
+        st.dataframe(df[["id","credito_id","pedido_id","username","fecha","tipo_credito","monto_usd","monto_bcv","tasa_bcv","monto_bs","metodo","referencia","status"]], use_container_width=True, hide_index=True)
         abono_id = st.number_input("ID abono", min_value=1, value=int(df.iloc[0]["id"]))
         rows = q("SELECT * FROM abonos WHERE id=?", (int(abono_id),), fetch=True)
         if rows:
@@ -3499,7 +3730,7 @@ def render_card_producto(prod, user):
 
         price_lines = []
         if int(prod["maneja_docena"] or 0):
-            price_lines.append(f"Docena: <b>{money_usd(prod['precio_docena'])}</b> · {money_bs(float(prod['precio_docena'] or 0) * tasa)}")
+            price_lines.append(f"{producto_intermedia_label(prod)}: <b>{money_usd(prod['precio_docena'])}</b> c/u · {money_bs(float(prod['precio_docena'] or 0) * tasa)} c/u")
         if int(prod["maneja_bulto"] or 0):
             bulto_contiene = int(prod["bulto_contiene"] or 1)
             precio_bulto_unitario = float(prod["precio_bulto"] or 0)
@@ -3521,7 +3752,7 @@ def render_card_producto(prod, user):
                 <div style="margin-top:8px;border:1px solid #dbeafe;background:#eff6ff;border-radius:12px;padding:8px;">
                   <div style="font-weight:900;color:#1d4ed8;">Sugerido MercadoLibre (+{com_ml:.1f}%)</div>
                   <div class="muted">Unidad: <b>{money_bs(ml_u_bs)}</b> · Eq. BCV ${ml_u_bcv:,.2f}</div>
-                  <div class="muted">Docena c/u: <b>{money_bs(ml_d_bs)}</b> · Eq. BCV ${ml_d_bcv:,.2f}</div>
+                  <div class="muted">{producto_intermedia_nombre(prod)} c/u: <b>{money_bs(ml_d_bs)}</b> · Eq. BCV ${ml_d_bcv:,.2f}</div>
                   <div class="muted">Bulto c/u: <b>{money_bs(ml_b_bs)}</b> · Eq. BCV ${ml_b_bcv:,.2f}</div>
                 </div>
                 """,
@@ -3537,7 +3768,12 @@ def render_card_producto(prod, user):
         if int(prod["maneja_bulto"] or 0):
             opciones.append("bulto")
 
-        presentacion = st.selectbox("Presentación", opciones, key=f"pres_{prod['sku']}", label_visibility="collapsed")
+        labels_pres = {
+            "unidad": "Unidad",
+            "docena": producto_intermedia_label(prod),
+            "bulto": "Bulto"
+        }
+        presentacion = st.selectbox("Presentación", opciones, key=f"pres_{prod['sku']}", label_visibility="collapsed", format_func=lambda x: labels_pres.get(x, x))
 
         if presentacion == "unidad":
             cantidad = st.number_input("Cantidad", min_value=1, max_value=9999, value=1, step=1, key=f"cant_{prod['sku']}", label_visibility="collapsed")
@@ -3584,6 +3820,8 @@ def render_card_producto(prod, user):
                 "presentacion": presentacion,
                 "escala_aplicada": escala_aplicada,
                 "detalle_precio": precio_calc.get("detalle_precio", escala_aplicada),
+                "presentacion_nombre": precio_calc.get("presentacion_nombre", producto_intermedia_nombre(prod) if presentacion == "docena" else presentacion.title()),
+                "presentacion_label": precio_calc.get("presentacion_label", producto_intermedia_label(prod) if presentacion == "docena" else presentacion.title()),
                 "cantidad_presentacion": cantidad_final,
                 "equivalencia": int(eq),
                 "unidades_base_total": int(unidades_base_total),
@@ -3783,6 +4021,18 @@ def carrito_view():
             help="Contado no crea saldo pendiente. Crédito crea una cuenta por cobrar."
         )
 
+        credito_tipo_label = "Divisas reales"
+        if tipo_label == "Crédito":
+            credito_tipo_label = st.radio(
+                "Modalidad de crédito",
+                ["Divisas reales", "Crédito BCV"],
+                horizontal=True,
+                help="Crédito BCV convierte el total en Bs del pedido a $ BCV y se paga a la tasa BCV vigente del día del pago."
+            )
+            if credito_tipo_label == "Crédito BCV":
+                tasa_bcv_preview = get_tasa_bcv()
+                total_bs_preview = (t["subtotal"] + float(0)) * get_tasa_proveedor()
+                st.info(f"Crédito BCV: el saldo se expresará en $ BCV. Tasa BCV actual: {tasa_bcv_preview:,.2f}.")
         if tipo_label == "Crédito" and user["rol"] != "admin" and int(user["credito_habilitado"] or 0) != 1:
             st.warning("Tu usuario no tiene crédito habilitado. El administrador debe activarlo.")
 
@@ -3810,7 +4060,8 @@ def carrito_view():
             st.error("No puedes crear pedido a crédito porque tu usuario no tiene crédito habilitado.")
         else:
             tipo_pago = "credito" if tipo_label == "Crédito" else "contado"
-            pid, msg = crear_pedido_desde_carrito(user, carrito, tipo_pago, metodo_pago, envio_pedido, notas_pedido)
+            tipo_credito = "bcv" if tipo_label == "Crédito" and credito_tipo_label == "Crédito BCV" else "usd"
+            pid, msg = crear_pedido_desde_carrito(user, carrito, tipo_pago, metodo_pago, envio_pedido, notas_pedido, tipo_credito=tipo_credito)
             if pid:
                 st.success(f"{msg} Pedido #{pid}.")
                 pdf = generar_pdf_pedido(pid)
@@ -3892,6 +4143,9 @@ if user is None:
     st.stop()
 
 show_feedback()
+auto_sync_stock_si_corresponde()
+if st.session_state.get("_auto_stock_sync_msg"):
+    st.sidebar.caption(st.session_state.get("_auto_stock_sync_msg"))
 
 with st.sidebar:
     st.title("📦 Insumos Mayor")
