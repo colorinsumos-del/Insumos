@@ -40,7 +40,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V2 Fix39 Flujo Pago Bs"
+APP_NAME = "Sistema de Insumos al Mayor V2 Fix40 Crédito BCV Doble Paso"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -4013,7 +4013,13 @@ def carrito_view():
     st.subheader("Finalizar pedido")
     st.info("Selecciona el tipo de operación antes de crear el pedido. Así evitamos hacer doble paso.")
 
-    with st.form("form_procesar_pedido_directo"):
+    st.markdown("### Procesar pedido")
+
+    # Estado temporal del cálculo BCV. Si el carrito cambia o el usuario recalcula, se actualiza.
+    if "_credito_bcv_calc" not in st.session_state:
+        st.session_state["_credito_bcv_calc"] = None
+
+    with st.form("form_preparar_pedido"):
         tipo_label = st.radio(
             "Tipo de operación",
             ["Contado", "Crédito"],
@@ -4029,10 +4035,7 @@ def carrito_view():
                 horizontal=True,
                 help="Crédito BCV convierte el total en Bs del pedido a $ BCV y se paga a la tasa BCV vigente del día del pago."
             )
-            if credito_tipo_label == "Crédito BCV":
-                tasa_bcv_preview = get_tasa_bcv()
-                total_bs_preview = (t["subtotal"] + float(0)) * get_tasa_proveedor()
-                st.info(f"Crédito BCV: el saldo se expresará en $ BCV. Tasa BCV actual: {tasa_bcv_preview:,.2f}.")
+
         if tipo_label == "Crédito" and user["rol"] != "admin" and int(user["credito_habilitado"] or 0) != 1:
             st.warning("Tu usuario no tiene crédito habilitado. El administrador debe activarlo.")
 
@@ -4052,65 +4055,96 @@ def carrito_view():
             envio_pedido = 0.0
             st.caption("Este cliente no tiene activa la casilla ML / ENVÍO, por eso no se muestra cobro de envío.")
 
+        notas_pedido = st.text_area("Notas del pedido")
+
         total_preview_usd = float(t["subtotal"]) + float(envio_pedido or 0)
         tasa_prov_preview = get_tasa_proveedor()
         tasa_bcv_preview = get_tasa_bcv()
         total_preview_bs = total_preview_usd * tasa_prov_preview
+        credito_bcv_preview = total_preview_bs / tasa_bcv_preview if tasa_bcv_preview else 0
 
-        st.markdown("### Pasos antes de procesar")
+        st.markdown("### Revisión antes de continuar")
+
         if tipo_label == "Contado":
             if metodo_pago in ["Transferencia", "Pago móvil"]:
                 st.info(
                     f"Pago en Bs seleccionado.\n\n"
-                    f"1. Total del pedido: {money_usd(total_preview_usd)}.\n"
-                    f"2. Tasa proveedor actual: {tasa_prov_preview:,.2f}.\n"
-                    f"3. Cliente debe transferir: {money_bs(total_preview_bs)}.\n"
-                    f"4. Luego de confirmar el pago, procesa el pedido.\n\n"
-                    f"Importante: este pedido quedará como pendiente de pago hasta que el administrador lo valide o lo marque como finalizado."
+                    f"Total del pedido: {money_usd(total_preview_usd)}\n\n"
+                    f"Tasa proveedor actual: {tasa_prov_preview:,.2f}\n\n"
+                    f"Cliente debe transferir: {money_bs(total_preview_bs)}"
                 )
             elif metodo_pago in ["Divisas", "Zelle", "Zinli", "Binance"]:
                 st.info(
                     f"Pago en divisas seleccionado.\n\n"
-                    f"1. Total del pedido: {money_usd(total_preview_usd)}.\n"
-                    f"2. El cliente debe cancelar ese monto por {metodo_pago}.\n"
-                    f"3. Luego de confirmar el pago, procesa el pedido."
+                    f"Total a cancelar: {money_usd(total_preview_usd)} por {metodo_pago}."
                 )
             else:
-                st.warning(
-                    "Selecciona el método de pago antes de crear el pedido. "
-                    "Así el sistema puede mostrar los pasos correctos al cliente."
-                )
+                st.warning("Selecciona el método de pago antes de crear el pedido.")
+
+        elif credito_tipo_label == "Divisas reales":
+            st.info(
+                f"Crédito en divisas reales.\n\n"
+                f"Saldo que se generará: {money_usd(total_preview_usd)}\n\n"
+                f"Referencia en Bs hoy: {money_bs(total_preview_usd * tasa_prov_preview)}"
+            )
+
         else:
-            if credito_tipo_label == "Crédito BCV":
-                credito_bcv_preview = total_preview_bs / tasa_bcv_preview if tasa_bcv_preview else 0
-                st.info(
-                    f"Crédito BCV seleccionado.\n\n"
-                    f"1. Total real del pedido: {money_usd(total_preview_usd)}.\n"
-                    f"2. Total en Bs a tasa proveedor: {money_bs(total_preview_bs)}.\n"
-                    f"3. Tasa BCV actual: {tasa_bcv_preview:,.2f}.\n"
-                    f"4. Crédito generado: {money_usd(credito_bcv_preview)} BCV.\n\n"
-                    f"El cliente luego pagará sus abonos indicando cuánto desea pagar en $ BCV. "
-                    f"El sistema calculará los Bs a transferir según la tasa BCV vigente del día del pago."
-                )
-            else:
-                st.info(
-                    f"Crédito en divisas reales seleccionado.\n\n"
-                    f"1. Total del crédito: {money_usd(total_preview_usd)}.\n"
-                    f"2. Si paga en Bs, se calculará con tasa proveedor vigente al momento del pago.\n"
-                    f"3. Al crear el pedido se generará una cuenta por cobrar."
-                )
+            st.warning(
+                "Crédito BCV requiere doble paso:\n\n"
+                "1. Primero presiona Calcular crédito BCV.\n\n"
+                "2. Revisa el monto generado.\n\n"
+                "3. Luego presiona Crear pedido confirmado."
+            )
+            st.info(
+                f"Vista previa:\n\n"
+                f"Total real USD: {money_usd(total_preview_usd)}\n\n"
+                f"Total Bs a tasa proveedor: {money_bs(total_preview_bs)}\n\n"
+                f"Tasa BCV actual: {tasa_bcv_preview:,.2f}\n\n"
+                f"Crédito estimado: {money_usd(credito_bcv_preview)} BCV"
+            )
 
-        notas_pedido = st.text_area("Notas del pedido")
-        submit_pedido = st.form_submit_button("✅ Crear pedido", type="primary")
+        col_accion1, col_accion2 = st.columns(2)
+        calcular_bcv = col_accion1.form_submit_button(
+            "🧮 Calcular crédito BCV",
+            type="secondary",
+            disabled=not (tipo_label == "Crédito" and credito_tipo_label == "Crédito BCV")
+        )
+        crear_pedido_normal = col_accion2.form_submit_button(
+            "✅ Crear pedido",
+            type="primary",
+            disabled=(tipo_label == "Crédito" and credito_tipo_label == "Crédito BCV")
+        )
 
-    if submit_pedido:
+    if calcular_bcv:
+        if metodo_pago == "Por confirmar":
+            st.error("Antes de calcular el crédito BCV debes seleccionar un método de pago.")
+        elif tipo_label == "Crédito" and user["rol"] != "admin" and int(user["credito_habilitado"] or 0) != 1:
+            st.error("No puedes crear pedido a crédito porque tu usuario no tiene crédito habilitado.")
+        elif tasa_bcv_preview <= 0:
+            st.error("No se puede calcular Crédito BCV porque la tasa BCV está en cero.")
+        else:
+            st.session_state["_credito_bcv_calc"] = {
+                "subtotal_usd": float(t["subtotal"]),
+                "envio_usd": float(envio_pedido or 0),
+                "total_usd": float(total_preview_usd),
+                "tasa_proveedor": float(tasa_prov_preview),
+                "total_bs": float(total_preview_bs),
+                "tasa_bcv": float(tasa_bcv_preview),
+                "credito_bcv": float(credito_bcv_preview),
+                "metodo_pago": metodo_pago,
+                "notas": notas_pedido,
+                "cart_signature": json.dumps(carrito, sort_keys=True, ensure_ascii=False),
+            }
+            st.success("Crédito BCV calculado. Revisa el resumen y luego confirma el pedido.")
+
+    if crear_pedido_normal:
         if metodo_pago == "Por confirmar":
             st.error("Antes de crear el pedido debes seleccionar un método de pago.")
         elif tipo_label == "Crédito" and user["rol"] != "admin" and int(user["credito_habilitado"] or 0) != 1:
             st.error("No puedes crear pedido a crédito porque tu usuario no tiene crédito habilitado.")
         else:
             tipo_pago = "credito" if tipo_label == "Crédito" else "contado"
-            tipo_credito = "bcv" if tipo_label == "Crédito" and credito_tipo_label == "Crédito BCV" else "usd"
+            tipo_credito = "usd"
             pid, msg = crear_pedido_desde_carrito(user, carrito, tipo_pago, metodo_pago, envio_pedido, notas_pedido, tipo_credito=tipo_credito)
             if pid:
                 st.success(f"{msg} Pedido #{pid}.")
@@ -4118,6 +4152,49 @@ def carrito_view():
                 st.download_button("⬇️ Descargar PDF pedido", data=pdf, file_name=f"pedido_{pid:04d}.pdf", mime="application/pdf", use_container_width=True)
             else:
                 st.error(msg)
+
+    # Confirmación separada para Crédito BCV: nunca se crea con el primer botón.
+    calc = st.session_state.get("_credito_bcv_calc")
+    if calc:
+        carrito_actual_sig = json.dumps(carrito, sort_keys=True, ensure_ascii=False)
+        if calc.get("cart_signature") != carrito_actual_sig:
+            st.warning("El carrito cambió después de calcular el Crédito BCV. Vuelve a calcular antes de crear el pedido.")
+        else:
+            st.markdown("---")
+            st.subheader("Confirmar Crédito BCV")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Total real", money_usd(calc["total_usd"]))
+            c2.metric("Total Bs proveedor", money_bs(calc["total_bs"]))
+            c3.metric("Tasa BCV", f"{calc['tasa_bcv']:,.2f}")
+            c4.metric("Crédito BCV", f"{money_usd(calc['credito_bcv'])} BCV")
+
+            st.info(
+                "Al confirmar, se creará el pedido y la cuenta por cobrar en $ BCV. "
+                "El cliente pagará sus abonos en $ BCV y el sistema calculará los Bs a transferir con la tasa BCV vigente del día del pago."
+            )
+
+            cc1, cc2 = st.columns(2)
+            if cc1.button("✅ Crear pedido confirmado con Crédito BCV", type="primary", use_container_width=True):
+                pid, msg = crear_pedido_desde_carrito(
+                    user,
+                    carrito,
+                    "credito",
+                    calc["metodo_pago"],
+                    calc["envio_usd"],
+                    calc["notas"],
+                    tipo_credito="bcv"
+                )
+                if pid:
+                    st.session_state["_credito_bcv_calc"] = None
+                    st.success(f"{msg} Pedido #{pid} creado con Crédito BCV.")
+                    pdf = generar_pdf_pedido(pid)
+                    st.download_button("⬇️ Descargar PDF pedido", data=pdf, file_name=f"pedido_{pid:04d}.pdf", mime="application/pdf", use_container_width=True)
+                else:
+                    st.error(msg)
+
+            if cc2.button("Cancelar cálculo BCV", use_container_width=True):
+                st.session_state["_credito_bcv_calc"] = None
+                st.rerun()
 
     if user["rol"] == "admin":
         st.markdown("---")
