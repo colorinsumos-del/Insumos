@@ -41,7 +41,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V65 Abonos sin Enter Submit"
+APP_NAME = "Sistema de Insumos al Mayor V66 Creación de Pedido Segura"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -804,6 +804,11 @@ def init_db():
     add_col("pedidos", "tasa_bcv", "REAL DEFAULT 0")
     add_col("pedidos", "credito_tipo", "TEXT DEFAULT 'usd'")
     add_col("pedidos", "total_bcv_credito", "REAL DEFAULT 0")
+    add_col("pedidos", "pedido_token", "TEXT")
+    try:
+        q("CREATE UNIQUE INDEX IF NOT EXISTS idx_pedidos_pedido_token ON pedidos(pedido_token) WHERE pedido_token IS NOT NULL AND pedido_token<>''")
+    except Exception:
+        pass
 
     add_col("creditos", "tipo_credito", "TEXT DEFAULT 'usd'")
     add_col("creditos", "tasa_bcv_creacion", "REAL DEFAULT 0")
@@ -1570,7 +1575,13 @@ def usuarios_visibles_para(user):
         return [r["username"] for r in rows]
     return [user["username"]]
 
-def crear_pedido_desde_carrito(user, carrito, tipo_pago, metodo_pago, envio_usd, notas, cliente_extra=None, tipo_credito="usd", cliente_target_username=None):
+def crear_pedido_desde_carrito(user, carrito, tipo_pago, metodo_pago, envio_usd, notas, cliente_extra=None, tipo_credito="usd", cliente_target_username=None, pedido_token=None):
+    pedido_token = (pedido_token or "").strip()
+    if pedido_token:
+        ya_creado = q("SELECT id FROM pedidos WHERE pedido_token=?", (pedido_token,), fetch=True)
+        if ya_creado:
+            return int(ya_creado[0]["id"]), "Este pedido ya estaba creado. No se duplicó."
+
     if not carrito:
         return None, "Carrito vacío."
 
@@ -1617,13 +1628,13 @@ def crear_pedido_desde_carrito(user, carrito, tipo_pago, metodo_pago, envio_usd,
     q("""INSERT INTO pedidos
          (fecha, username, cliente_nombre, cliente_rif, cliente_telefono, cliente_direccion, items,
           tipo_pago, metodo_pago, subtotal_usd, envio_usd, total_usd, tasa_proveedor, tasa_bcv,
-          total_bs_proveedor, peso_total_kg, status, notas, credito_tipo, total_bcv_credito)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+          total_bs_proveedor, peso_total_kg, status, notas, credito_tipo, total_bcv_credito, pedido_token)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
       (now(), username, cliente_nombre, cliente_rif, cliente_tel, cliente_dir, json.dumps(carrito, ensure_ascii=False),
        tipo_pago, metodo_pago, subtotal, float(envio_usd or 0), total, tasa, tasa_bcv,
        total_bs_base, t["peso_total_kg"],
        "Crédito / Pendiente de pago" if tipo_pago == "credito" else "Pendiente de pago",
-       notas, credito_tipo, total_bcv_credito))
+       notas, credito_tipo, total_bcv_credito, pedido_token))
     pedido_id = q("SELECT last_insert_rowid() AS id", fetch=True)[0]["id"]
 
     credito_id = None
@@ -5183,6 +5194,31 @@ def recalcular_pedido_y_credito(pedido_id, items, envio_usd, metodo_pago=None, n
                   (nuevo_monto, nuevo_saldo, total_bs, tasa, nuevo_status, int(cr["id"])))
     return True, "Pedido recalculado correctamente."
 
+def pedido_carrito_signature(username, carrito, tipo_operacion, metodo_pago, envio_usd, cliente_username):
+    try:
+        data = {
+            "username": username,
+            "cliente_username": cliente_username,
+            "carrito": carrito,
+            "tipo_operacion": tipo_operacion,
+            "metodo_pago": metodo_pago,
+            "envio_usd": float(envio_usd or 0),
+        }
+        return hashlib.sha256(json.dumps(data, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+    except Exception:
+        return secrets.token_hex(16)
+
+def obtener_token_pedido_seguro(signature, key_token="_pedido_token_actual", key_sig="_pedido_signature_actual"):
+    if st.session_state.get(key_sig) != signature or not st.session_state.get(key_token):
+        st.session_state[key_sig] = signature
+        st.session_state[key_token] = secrets.token_hex(24)
+    return st.session_state[key_token]
+
+def reset_token_pedido_seguro(key_token="_pedido_token_actual", key_sig="_pedido_signature_actual"):
+    st.session_state.pop(key_token, None)
+    st.session_state.pop(key_sig, None)
+
+
 def carrito_view():
     st.title("🛒 Carrito")
     user = get_user(st.session_state.user["username"])
@@ -5446,18 +5482,31 @@ def carrito_view():
         and credito_habilitado_ok
     )
 
+    pedido_sig_actual = pedido_carrito_signature(
+        user["username"],
+        carrito_preview,
+        tipo_operacion,
+        metodo_pago,
+        envio_pedido,
+        cliente_pedido["username"]
+    )
+    pedido_token_actual = obtener_token_pedido_seguro(pedido_sig_actual)
+    pedido_creando = bool(st.session_state.get("_pedido_creando", False))
+    if pedido_creando:
+        st.info("⏳ Creando tu pedido, por favor espera y no cierres la página.")
+
     col_accion1, col_accion2 = st.columns(2)
     calcular_bcv = col_accion1.button(
         "🧮 Calcular crédito BCV",
         type="secondary",
-        disabled=not puede_calcular_bcv,
+        disabled=not puede_calcular_bcv or pedido_creando,
         use_container_width=True,
         key="btn_calcular_credito_bcv"
     )
     crear_pedido_normal = col_accion2.button(
         "✅ Crear pedido",
         type="primary",
-        disabled=not puede_crear_normal,
+        disabled=not puede_crear_normal or pedido_creando,
         use_container_width=True,
         key="btn_crear_pedido_normal"
     )
@@ -5478,27 +5527,40 @@ def carrito_view():
             "cliente_target_username": cliente_pedido["username"],
             "cliente_nombre": cliente_pedido["nombre"] or cliente_pedido["username"],
             "cart_signature": json.dumps(carrito, sort_keys=True, ensure_ascii=False),
+            "pedido_token": pedido_token_actual,
+            "pedido_signature": pedido_sig_actual,
         }
         st.success("Crédito BCV calculado. Revisa el resumen y luego confirma el pedido.")
 
     if crear_pedido_normal:
-        tipo_pago = "credito" if tipo_operacion == "Crédito en divisas" else "contado"
-        pid, msg = crear_pedido_desde_carrito(
-            user,
-            carrito,
-            tipo_pago,
-            metodo_pago,
-            envio_pedido,
-            notas_pedido,
-            tipo_credito="usd",
-            cliente_target_username=cliente_pedido["username"]
-        )
-        if pid:
-            st.success(f"{msg} Pedido #{pid}.")
-            pdf = generar_pdf_pedido(pid)
-            st.download_button("⬇️ Descargar PDF pedido", data=pdf, file_name=f"pedido_{pid:04d}.pdf", mime="application/pdf", use_container_width=True)
+        if st.session_state.get("_pedido_creando", False):
+            st.warning("Ya se está creando un pedido. Espera unos segundos.")
         else:
-            st.error(msg)
+            st.session_state["_pedido_creando"] = True
+            tipo_pago = "credito" if tipo_operacion == "Crédito en divisas" else "contado"
+            try:
+                with st.spinner("Creando tu pedido... por favor espera."):
+                    pid, msg = crear_pedido_desde_carrito(
+                        user,
+                        carrito,
+                        tipo_pago,
+                        metodo_pago,
+                        envio_pedido,
+                        notas_pedido,
+                        tipo_credito="usd",
+                        cliente_target_username=cliente_pedido["username"],
+                        pedido_token=pedido_token_actual
+                    )
+                if pid:
+                    reset_token_pedido_seguro()
+                    st.session_state["_ultimo_pedido_creado_id"] = int(pid)
+                    st.success(f"{msg} Pedido #{pid}.")
+                    pdf = generar_pdf_pedido(pid)
+                    st.download_button("⬇️ Descargar PDF pedido", data=pdf, file_name=f"pedido_{pid:04d}.pdf", mime="application/pdf", use_container_width=True)
+                else:
+                    st.error(msg)
+            finally:
+                st.session_state["_pedido_creando"] = False
 
     calc = st.session_state.get("_credito_bcv_calc")
     if calc:
@@ -5521,24 +5583,42 @@ def carrito_view():
             )
 
             cc1, cc2 = st.columns(2)
-            if cc1.button("✅ Crear pedido confirmado con Crédito BCV", type="primary", use_container_width=True, key="btn_confirmar_pedido_bcv"):
-                pid, msg = crear_pedido_desde_carrito(
-                    user,
-                    carrito,
-                    "credito",
-                    calc["metodo_pago"],
-                    calc["envio_usd"],
-                    calc["notas"],
-                    tipo_credito="bcv",
-                    cliente_target_username=calc.get("cliente_target_username")
-                )
-                if pid:
-                    st.session_state["_credito_bcv_calc"] = None
-                    st.success(f"{msg} Pedido #{pid} creado con Crédito BCV.")
-                    pdf = generar_pdf_pedido(pid)
-                    st.download_button("⬇️ Descargar PDF pedido", data=pdf, file_name=f"pedido_{pid:04d}.pdf", mime="application/pdf", use_container_width=True)
+            confirmar_pedido_bcv = cc1.button(
+                "✅ Crear pedido confirmado con Crédito BCV",
+                type="primary",
+                use_container_width=True,
+                key="btn_confirmar_pedido_bcv",
+                disabled=bool(st.session_state.get("_pedido_creando", False))
+            )
+            if confirmar_pedido_bcv:
+                if st.session_state.get("_pedido_creando", False):
+                    st.warning("Ya se está creando un pedido. Espera unos segundos.")
                 else:
-                    st.error(msg)
+                    st.session_state["_pedido_creando"] = True
+                    try:
+                        with st.spinner("Creando pedido con Crédito BCV... por favor espera."):
+                            pid, msg = crear_pedido_desde_carrito(
+                                user,
+                                carrito,
+                                "credito",
+                                calc["metodo_pago"],
+                                calc["envio_usd"],
+                                calc["notas"],
+                                tipo_credito="bcv",
+                                cliente_target_username=calc.get("cliente_target_username"),
+                                pedido_token=calc.get("pedido_token") or pedido_token_actual
+                            )
+                        if pid:
+                            st.session_state["_credito_bcv_calc"] = None
+                            reset_token_pedido_seguro()
+                            st.session_state["_ultimo_pedido_creado_id"] = int(pid)
+                            st.success(f"{msg} Pedido #{pid} creado con Crédito BCV.")
+                            pdf = generar_pdf_pedido(pid)
+                            st.download_button("⬇️ Descargar PDF pedido", data=pdf, file_name=f"pedido_{pid:04d}.pdf", mime="application/pdf", use_container_width=True)
+                        else:
+                            st.error(msg)
+                    finally:
+                        st.session_state["_pedido_creando"] = False
 
             if cc2.button("Cancelar cálculo BCV", use_container_width=True, key="btn_cancelar_calc_bcv"):
                 st.session_state["_credito_bcv_calc"] = None
