@@ -40,7 +40,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V56 Fix1 Precio Especial por Presentación"
+APP_NAME = "Sistema de Insumos al Mayor V57 Métodos de Pago y Abonos Tasa Proveedor"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -697,6 +697,26 @@ def init_db():
     """)
 
     q("""
+    CREATE TABLE IF NOT EXISTS metodos_pago (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nombre TEXT,
+        tipo TEXT,
+        banco TEXT,
+        titular TEXT,
+        cuenta TEXT,
+        cedula_rif TEXT,
+        tipo_cuenta TEXT,
+        telefono TEXT,
+        correo TEXT,
+        apodo TEXT,
+        activo INTEGER DEFAULT 1,
+        notas TEXT,
+        creado_en TEXT,
+        actualizado_en TEXT
+    )
+    """)
+
+    q("""
     CREATE TABLE IF NOT EXISTS productos_vendedores (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         sku TEXT,
@@ -794,6 +814,8 @@ def init_db():
     add_col("abonos", "monto_bcv", "REAL DEFAULT 0")
     add_col("abonos", "tasa_bcv", "REAL DEFAULT 0")
     add_col("abonos", "monto_bs_esperado", "REAL DEFAULT 0")
+    add_col("abonos", "tasa_proveedor", "REAL DEFAULT 0")
+    add_col("abonos", "metodo_pago_id", "INTEGER DEFAULT 0")
 
     set_default("stock_auto_sync_minutos", "60")
 
@@ -2470,7 +2492,23 @@ def admin_productos():
 
     with tab_form:
         st.subheader("Crear o editar producto")
-        sku_e = st.text_input("SKU")
+
+        buscar_edit = st.text_input("Buscar producto para editar", placeholder="Escribe nombre o SKU del producto...")
+        if buscar_edit:
+            encontrados = q("""SELECT sku, descripcion FROM productos
+                                WHERE sku LIKE ? OR descripcion LIKE ?
+                                ORDER BY descripcion LIMIT 50""",
+                             (f"%{buscar_edit}%", f"%{buscar_edit}%"), fetch=True)
+            if encontrados:
+                opts_prod = {f"{r['descripcion']} — {r['sku']}": r["sku"] for r in encontrados}
+                sel_prod = st.selectbox("Resultados", list(opts_prod.keys()))
+                if st.button("Cargar producto seleccionado", use_container_width=True):
+                    st.session_state["sku_producto_editar"] = opts_prod[sel_prod]
+                    st.rerun()
+            else:
+                st.info("No se encontraron productos con esa búsqueda.")
+
+        sku_e = st.text_input("SKU", value=st.session_state.get("sku_producto_editar", ""))
         prod = q("SELECT * FROM productos WHERE sku=?", (sku_e.strip(),), fetch=True) if sku_e.strip() else []
         prod = prod[0] if prod else None
 
@@ -3182,6 +3220,142 @@ def mis_pedidos():
                     st.rerun()
 
 
+def metodo_pago_label(mp):
+    if not mp:
+        return "Sin método"
+    return f"{mp['nombre']} ({mp['tipo']})"
+
+def metodo_pago_detalle_texto(mp):
+    if not mp:
+        return ""
+    tipo = str(mp["tipo"] or "")
+    partes = [f"Método: {mp['nombre']}"]
+    if tipo:
+        partes.append(f"Tipo: {tipo}")
+    for campo, etiqueta in [
+        ("banco", "Banco"),
+        ("titular", "Titular"),
+        ("cuenta", "Cuenta"),
+        ("cedula_rif", "Cédula/RIF"),
+        ("tipo_cuenta", "Tipo de cuenta"),
+        ("telefono", "Teléfono"),
+        ("correo", "Correo"),
+        ("apodo", "Apodo"),
+    ]:
+        try:
+            val = mp[campo]
+        except Exception:
+            val = None
+        if val:
+            partes.append(f"{etiqueta}: {val}")
+    if mp["notas"]:
+        partes.append(f"Notas: {mp['notas']}")
+    return "\n".join(partes)
+
+def metodos_pago_activos():
+    return q("SELECT * FROM metodos_pago WHERE activo=1 ORDER BY tipo,nombre", fetch=True)
+
+def render_metodo_pago_card(mp):
+    if not mp:
+        st.info("No hay método de pago seleccionado.")
+        return
+    st.markdown("#### Datos de pago")
+    st.code(metodo_pago_detalle_texto(mp), language="text")
+
+def admin_metodos_pago():
+    st.title("🏦 Métodos de pago")
+    st.caption("Carga aquí los datos bancarios y métodos que verán los clientes al notificar pagos o abonos.")
+
+    tab_list, tab_form = st.tabs(["Listado", "Crear / Editar"])
+
+    with tab_list:
+        df = pd.read_sql_query("SELECT id,nombre,tipo,banco,titular,cuenta,cedula_rif,tipo_cuenta,telefono,correo,apodo,activo,notas FROM metodos_pago ORDER BY activo DESC,tipo,nombre", get_conn())
+        if df.empty:
+            st.info("Aún no tienes métodos de pago cargados.")
+        else:
+            st.dataframe(df, use_container_width=True, hide_index=True)
+
+    with tab_form:
+        metodos = q("SELECT * FROM metodos_pago ORDER BY activo DESC,tipo,nombre", fetch=True)
+        opts = ["Crear nuevo"] + [f"#{m['id']} · {m['nombre']} ({m['tipo']})" for m in metodos]
+        mapa = {f"#{m['id']} · {m['nombre']} ({m['tipo']})": m for m in metodos}
+        sel = st.selectbox("Seleccionar método", opts)
+        edit = mapa.get(sel)
+
+        tipos = ["Cuenta bancaria Venezuela", "Pago móvil", "Binance", "Banesco Panamá", "Zelle", "Efectivo", "Otro"]
+        tipo_actual = edit["tipo"] if edit and edit["tipo"] in tipos else tipos[0]
+
+        with st.form("form_metodo_pago"):
+            nombre = st.text_input("Nombre visible", value=edit["nombre"] if edit else "", placeholder="Ej: BNC Jurídica COLOR INSUMOS")
+            tipo = st.selectbox("Tipo", tipos, index=tipos.index(tipo_actual))
+
+            banco = titular = cuenta = cedula_rif = tipo_cuenta = telefono = correo = apodo = ""
+            notas = st.text_area("Notas internas / instrucciones", value=edit["notas"] if edit and edit["notas"] else "")
+
+            if tipo == "Cuenta bancaria Venezuela":
+                c1, c2 = st.columns(2)
+                banco = c1.text_input("Banco", value=edit["banco"] if edit and edit["banco"] else "")
+                titular = c2.text_input("Nombre titular", value=edit["titular"] if edit and edit["titular"] else "")
+                c3, c4, c5 = st.columns(3)
+                cuenta = c3.text_input("Número de cuenta", value=edit["cuenta"] if edit and edit["cuenta"] else "")
+                cedula_rif = c4.text_input("Cédula/RIF titular", value=edit["cedula_rif"] if edit and edit["cedula_rif"] else "")
+                tipo_cuenta = c5.text_input("Tipo de cuenta", value=edit["tipo_cuenta"] if edit and edit["tipo_cuenta"] else "Corriente")
+            elif tipo == "Pago móvil":
+                c1, c2 = st.columns(2)
+                banco = c1.text_input("Banco", value=edit["banco"] if edit and edit["banco"] else "")
+                titular = c2.text_input("Nombre titular", value=edit["titular"] if edit and edit["titular"] else "")
+                c3, c4 = st.columns(2)
+                cedula_rif = c3.text_input("Cédula/RIF", value=edit["cedula_rif"] if edit and edit["cedula_rif"] else "")
+                telefono = c4.text_input("Teléfono", value=edit["telefono"] if edit and edit["telefono"] else "")
+            elif tipo == "Binance":
+                c1, c2, c3 = st.columns(3)
+                correo = c1.text_input("Correo Binance", value=edit["correo"] if edit and edit["correo"] else "")
+                apodo = c2.text_input("Apodo / Pay ID", value=edit["apodo"] if edit and edit["apodo"] else "")
+                titular = c3.text_input("Nombre titular", value=edit["titular"] if edit and edit["titular"] else "")
+            elif tipo == "Banesco Panamá":
+                c1, c2, c3 = st.columns(3)
+                titular = c1.text_input("Titular", value=edit["titular"] if edit and edit["titular"] else "")
+                cuenta = c2.text_input("Número de cuenta", value=edit["cuenta"] if edit and edit["cuenta"] else "")
+                tipo_cuenta = c3.text_input("Tipo de cuenta", value=edit["tipo_cuenta"] if edit and edit["tipo_cuenta"] else "")
+            elif tipo == "Zelle":
+                c1, c2 = st.columns(2)
+                titular = c1.text_input("Nombre titular", value=edit["titular"] if edit and edit["titular"] else "")
+                correo = c2.text_input("Correo Zelle", value=edit["correo"] if edit and edit["correo"] else "")
+            elif tipo == "Efectivo":
+                titular = st.text_input("Responsable / titular", value=edit["titular"] if edit and edit["titular"] else "")
+            else:
+                c1, c2 = st.columns(2)
+                titular = c1.text_input("Titular / responsable", value=edit["titular"] if edit and edit["titular"] else "")
+                correo = c2.text_input("Correo / referencia", value=edit["correo"] if edit and edit["correo"] else "")
+
+            activo = st.checkbox("Método activo", value=bool(edit["activo"]) if edit else True)
+
+            csave, cdel = st.columns(2)
+            guardar = csave.form_submit_button("💾 Guardar método", type="primary")
+            eliminar = cdel.form_submit_button("🗑️ Eliminar método", disabled=not bool(edit))
+
+        if guardar:
+            if not nombre.strip():
+                st.error("El nombre visible es obligatorio.")
+            else:
+                if edit:
+                    q("""UPDATE metodos_pago SET nombre=?,tipo=?,banco=?,titular=?,cuenta=?,cedula_rif=?,tipo_cuenta=?,telefono=?,correo=?,apodo=?,activo=?,notas=?,actualizado_en=? WHERE id=?""",
+                      (nombre.strip(), tipo, banco, titular, cuenta, cedula_rif, tipo_cuenta, telefono, correo, apodo, 1 if activo else 0, notas, now(), int(edit["id"])))
+                    st.success("Método actualizado.")
+                else:
+                    q("""INSERT INTO metodos_pago
+                         (nombre,tipo,banco,titular,cuenta,cedula_rif,tipo_cuenta,telefono,correo,apodo,activo,notas,creado_en,actualizado_en)
+                         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                      (nombre.strip(), tipo, banco, titular, cuenta, cedula_rif, tipo_cuenta, telefono, correo, apodo, 1 if activo else 0, notas, now(), now()))
+                    st.success("Método creado.")
+                st.rerun()
+
+        if eliminar and edit:
+            q("DELETE FROM metodos_pago WHERE id=?", (int(edit["id"]),))
+            st.warning("Método eliminado.")
+            st.rerun()
+
+
 def mis_creditos():
     st.title("💳 Mis créditos")
     user = get_user(st.session_state.user["username"])
@@ -3228,24 +3402,47 @@ def mis_creditos():
         cr = opts[sel]
         tipo = str(cr["tipo_credito"] if "tipo_credito" in cr.keys() and cr["tipo_credito"] else "usd").lower()
 
+        metodos = metodos_pago_activos()
+        metodo_opts = {metodo_pago_label(m): m for m in metodos}
+        if not metodo_opts:
+            st.warning("No hay métodos de pago activos. El admin debe cargarlos en Métodos de pago. Puedes notificar igualmente usando 'Por confirmar'.")
+            metodo_opts = {"Por confirmar": None}
+
         with st.form("form_abono"):
             if tipo == "bcv":
                 saldo_bcv = float(cr["saldo_bcv"] or cr["saldo_usd"] or 0)
                 monto_bcv = st.number_input("Monto a pagar en $ BCV", min_value=0.01, max_value=saldo_bcv, value=min(10.0, saldo_bcv), step=0.01)
                 tasa_actual = get_tasa_bcv()
                 monto_bs = monto_bcv * tasa_actual
-                st.info(f"Tasa BCV actual: {tasa_actual:,.2f}. Debes transferir: {money_bs(monto_bs)}")
-                metodo = st.text_input("Método de pago", value="Pago móvil / transferencia")
+                st.info(
+                    f"Tasa BCV del momento: {tasa_actual:,.2f}\n\n"
+                    f"Debes transferir: {money_bs(monto_bs)}\n\n"
+                    "Esta tasa quedará guardada en la notificación del pago."
+                )
+                metodo_sel = st.selectbox("Método de pago", list(metodo_opts.keys()), key="metodo_pago_credito_bcv")
+                mp = metodo_opts[metodo_sel]
+                if mp:
+                    render_metodo_pago_card(mp)
                 ref = st.text_input("Referencia")
                 comp = st.file_uploader("Comprobante", type=["jpg","jpeg","png","webp","pdf"])
                 notas = st.text_area("Notas")
                 submit = st.form_submit_button("Enviar pago BCV para validar", type="primary")
             else:
-                monto = st.number_input("Monto USD real", min_value=0.01, max_value=float(cr["saldo_usd"] or 0), value=min(10.0, float(cr["saldo_usd"] or 0)), step=0.01)
+                saldo_usd = float(cr["saldo_usd"] or 0)
+                monto = st.number_input("Monto USD que deseas abonar", min_value=0.01, max_value=saldo_usd, value=min(10.0, saldo_usd), step=0.01)
                 tasa_actual = get_tasa_proveedor()
                 monto_bs = monto * tasa_actual
-                st.info(f"Tasa proveedor actual: {tasa_actual:,.2f}. Referencia en Bs: {money_bs(monto_bs)}")
-                metodo = st.text_input("Método de pago", value="Pago móvil / transferencia / divisas")
+                st.info(
+                    f"Crédito en divisas.\n\n"
+                    f"Monto a abonar: {money_usd(monto)}\n\n"
+                    f"Tasa proveedor del momento: {tasa_actual:,.2f}\n\n"
+                    f"Monto a transferir: {money_bs(monto_bs)}\n\n"
+                    "Esta tasa quedará guardada en la notificación del pago."
+                )
+                metodo_sel = st.selectbox("Método de pago", list(metodo_opts.keys()), key="metodo_pago_credito_usd")
+                mp = metodo_opts[metodo_sel]
+                if mp:
+                    render_metodo_pago_card(mp)
                 ref = st.text_input("Referencia")
                 comp = st.file_uploader("Comprobante", type=["jpg","jpeg","png","webp","pdf"])
                 notas = st.text_area("Notas")
@@ -3253,30 +3450,35 @@ def mis_creditos():
 
         if submit:
             path = save_uploaded_file(comp, PAGOS_DIR, prefix=f"abono_credito_{cr['id']}")
+            metodo_nombre = metodo_pago_label(mp) if mp else metodo_sel
+            metodo_id = int(mp["id"]) if mp else 0
             if tipo == "bcv":
                 tasa_actual = get_tasa_bcv()
                 monto_bcv = float(monto_bcv)
                 monto_bs = monto_bcv * tasa_actual
                 q("""INSERT INTO abonos
                      (credito_id,pedido_id,username,fecha,monto_usd,monto_bs,metodo,referencia,comprobante_path,status,notas,
-                      tipo_credito,monto_bcv,tasa_bcv,monto_bs_esperado)
-                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                  (cr["id"], cr["pedido_id"], cr["username"], now(), monto_bcv, monto_bs, metodo, ref, path, "Pendiente de validar", notas,
-                   "bcv", monto_bcv, tasa_actual, monto_bs))
+                      tipo_credito,monto_bcv,tasa_bcv,tasa_proveedor,monto_bs_esperado,metodo_pago_id)
+                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                  (cr["id"], cr["pedido_id"], cr["username"], now(), monto_bcv, monto_bs, metodo_nombre, ref, path, "Pendiente de validar", notas,
+                   "bcv", monto_bcv, tasa_actual, 0, monto_bs, metodo_id))
             else:
                 tasa_actual = get_tasa_proveedor()
+                monto = float(monto)
+                monto_bs = monto * tasa_actual
                 q("""INSERT INTO abonos
                      (credito_id,pedido_id,username,fecha,monto_usd,monto_bs,metodo,referencia,comprobante_path,status,notas,
-                      tipo_credito,monto_bcv,tasa_bcv,monto_bs_esperado)
-                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                  (cr["id"], cr["pedido_id"], cr["username"], now(), monto, monto*tasa_actual, metodo, ref, path, "Pendiente de validar", notas,
-                   "usd", 0, get_tasa_bcv(), monto*tasa_actual))
+                      tipo_credito,monto_bcv,tasa_bcv,tasa_proveedor,monto_bs_esperado,metodo_pago_id)
+                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                  (cr["id"], cr["pedido_id"], cr["username"], now(), monto, monto_bs, metodo_nombre, ref, path, "Pendiente de validar", notas,
+                   "usd", 0, get_tasa_bcv(), tasa_actual, monto_bs, metodo_id))
             st.success("Pago cargado. Queda pendiente de validación.")
             st.rerun()
 
     if st.button("📄 Descargar estado de cuenta", use_container_width=True):
         pdf = generar_pdf_estado_cuenta(user["username"])
         st.download_button("⬇️ Estado de cuenta PDF", data=pdf, file_name=f"estado_cuenta_{user['username']}.pdf", mime="application/pdf", use_container_width=True)
+
 
 def validar_creditos():
     st.title("✅ Validar créditos / pagos")
@@ -3332,11 +3534,19 @@ def validar_creditos():
         if df.empty:
             st.success("No hay abonos pendientes.")
             return
-        st.dataframe(df[["id","credito_id","pedido_id","username","fecha","tipo_credito","monto_usd","monto_bcv","tasa_bcv","monto_bs","metodo","referencia","status"]], use_container_width=True, hide_index=True)
+        cols_abonos = ["id","credito_id","pedido_id","username","fecha","tipo_credito","monto_usd","monto_bcv","tasa_bcv","tasa_proveedor","monto_bs_esperado","monto_bs","metodo","referencia","status"]
+        cols_abonos = [c for c in cols_abonos if c in df.columns]
+        st.dataframe(df[cols_abonos], use_container_width=True, hide_index=True)
         abono_id = st.number_input("ID abono", min_value=1, value=int(df.iloc[0]["id"]))
         rows = q("SELECT * FROM abonos WHERE id=?", (int(abono_id),), fetch=True)
         if rows:
             ab = rows[0]
+            tipo_ab = str(ab["tipo_credito"] if "tipo_credito" in ab.keys() and ab["tipo_credito"] else "usd").lower()
+            if tipo_ab == "bcv":
+                st.info(f"Abono BCV: {money_usd(ab['monto_bcv'] or ab['monto_usd'])} BCV · Tasa BCV usada: {float(ab['tasa_bcv'] or 0):,.2f} · Bs esperado: {money_bs(ab['monto_bs_esperado'] or ab['monto_bs'] or 0)}")
+            else:
+                st.info(f"Abono USD: {money_usd(ab['monto_usd'])} · Tasa proveedor usada: {float(ab['tasa_proveedor'] if 'tasa_proveedor' in ab.keys() and ab['tasa_proveedor'] else 0):,.2f} · Bs esperado: {money_bs(ab['monto_bs_esperado'] or ab['monto_bs'] or 0)}")
+            st.caption(f"Método: {ab['metodo'] or 'N/A'} · Referencia: {ab['referencia'] or 'N/A'}")
             if ab["comprobante_path"]:
                 st.caption(f"Comprobante: {ab['comprobante_path']}")
             c1, c2, c3 = st.columns(3)
@@ -4917,7 +5127,7 @@ with st.sidebar:
 
     opciones = ["Tienda", "Carrito", "Mis pedidos", "Mis créditos", "Mi perfil"]
     if user["rol"] == "admin":
-        opciones += ["Dashboard", "Control POS", "Rentabilidad", "Publicaciones", "Vendedores", "Productos", "Categorías", "Cotizaciones", "Usuarios", "Validar créditos", "Reportes", "Configuración", "Respaldo"]
+        opciones += ["Dashboard", "Control POS", "Rentabilidad", "Publicaciones", "Vendedores", "Productos", "Categorías", "Cotizaciones", "Usuarios", "Métodos de pago", "Validar créditos", "Reportes", "Configuración", "Respaldo"]
     elif user["rol"] == "vendedor":
         opciones += ["Publicaciones", "Vendedores"]
     elif user["rol"] == "vendedor_mercadolibre":
@@ -4972,6 +5182,8 @@ elif menu == "Cotizaciones":
     admin_cotizaciones()
 elif menu == "Usuarios":
     admin_usuarios()
+elif menu == "Métodos de pago":
+    admin_metodos_pago()
 elif menu == "Validar créditos":
     validar_creditos()
 elif menu == "Reportes":
