@@ -41,7 +41,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V64 Backup ZIP y Limpieza"
+APP_NAME = "Sistema de Insumos al Mayor V65 Abonos sin Enter Submit"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -3627,6 +3627,8 @@ def mis_creditos():
 
     if creditos_pend:
         st.subheader("Cargar pago / abono")
+        st.caption("El cálculo se actualiza al cambiar/confirmar el monto. El abono solo se registra al presionar el botón final.")
+
         def opt_label(c):
             tipo = str(c["tipo_credito"] if "tipo_credito" in c.keys() and c["tipo_credito"] else "usd").lower()
             saldo_txt = f"{money_usd(c['saldo_bcv'] or c['saldo_usd'])} BCV" if tipo == "bcv" else money_usd(c["saldo_usd"])
@@ -3643,7 +3645,6 @@ def mis_creditos():
             st.warning("No hay métodos de pago activos. El admin debe cargarlos en Métodos de pago. Puedes notificar igualmente usando 'Por confirmar'.")
             metodo_opts = {"Por confirmar": None}
 
-        # Importante: selector fuera del formulario para que actualice datos en vivo.
         metodo_key = f"metodo_pago_credito_{tipo}_{cr['id']}"
         metodo_sel = st.selectbox("Método de pago", list(metodo_opts.keys()), key=metodo_key)
         mp = metodo_opts[metodo_sel]
@@ -3653,36 +3654,48 @@ def mis_creditos():
 
         if tipo == "bcv":
             saldo_bcv = float(cr["saldo_bcv"] or cr["saldo_usd"] or 0)
-            with st.form(f"form_abono_bcv_{cr['id']}"):
-                monto_bcv = st.number_input("Monto a pagar en $ BCV", min_value=0.01, max_value=saldo_bcv, value=min(10.0, saldo_bcv), step=0.01)
-                tasa_actual = get_tasa_bcv()
-                monto_bs = monto_bcv * tasa_actual
-                st.info(
-                    f"Tasa BCV del momento: {tasa_actual:,.2f}\n\n"
-                    f"Debes transferir: {money_bs(monto_bs)}\n\n"
-                    "Esta tasa quedará guardada en la notificación del pago."
-                )
-                ref = st.text_input("Referencia")
-                comp = st.file_uploader("Comprobante", type=["jpg","jpeg","png","webp","pdf"])
-                notas = st.text_area("Notas")
-                submit = st.form_submit_button("Enviar pago BCV para validar", type="primary")
+            monto_bcv = st.number_input(
+                "Monto a pagar en $ BCV",
+                min_value=0.01,
+                max_value=saldo_bcv,
+                value=min(10.0, saldo_bcv),
+                step=0.01,
+                key=f"monto_abono_bcv_{cr['id']}"
+            )
+            tasa_actual = get_tasa_bcv()
+            monto_bs = float(monto_bcv or 0) * tasa_actual
+            st.info(
+                f"Tasa BCV del momento: {tasa_actual:,.2f}\n\n"
+                f"Debes transferir: {money_bs(monto_bs)}\n\n"
+                "Esta tasa quedará guardada en la notificación del pago."
+            )
+            ref = st.text_input("Referencia", key=f"ref_abono_bcv_{cr['id']}")
+            comp = st.file_uploader("Comprobante", type=["jpg","jpeg","png","webp","pdf"], key=f"comp_abono_bcv_{cr['id']}")
+            notas = st.text_area("Notas", key=f"notas_abono_bcv_{cr['id']}")
+            submit = st.button("Enviar pago BCV para validar", type="primary", use_container_width=True, key=f"btn_abono_bcv_{cr['id']}")
         else:
             saldo_usd = float(cr["saldo_usd"] or 0)
-            with st.form(f"form_abono_usd_{cr['id']}"):
-                monto = st.number_input("Monto USD que deseas abonar", min_value=0.01, max_value=saldo_usd, value=min(10.0, saldo_usd), step=0.01)
-                tasa_actual = get_tasa_proveedor()
-                monto_bs = monto * tasa_actual
-                st.info(
-                    f"Crédito en divisas.\n\n"
-                    f"Monto a abonar: {money_usd(monto)}\n\n"
-                    f"Tasa proveedor del momento: {tasa_actual:,.2f}\n\n"
-                    f"Monto a transferir: {money_bs(monto_bs)}\n\n"
-                    "Esta tasa quedará guardada en la notificación del pago."
-                )
-                ref = st.text_input("Referencia")
-                comp = st.file_uploader("Comprobante", type=["jpg","jpeg","png","webp","pdf"])
-                notas = st.text_area("Notas")
-                submit = st.form_submit_button("Enviar pago para validar", type="primary")
+            monto = st.number_input(
+                "Monto USD que deseas abonar",
+                min_value=0.01,
+                max_value=saldo_usd,
+                value=min(10.0, saldo_usd),
+                step=0.01,
+                key=f"monto_abono_usd_{cr['id']}"
+            )
+            tasa_actual = get_tasa_proveedor()
+            monto_bs = float(monto or 0) * tasa_actual
+            st.info(
+                f"Crédito en divisas.\n\n"
+                f"Monto a abonar: {money_usd(monto)}\n\n"
+                f"Tasa proveedor del momento: {tasa_actual:,.2f}\n\n"
+                f"Monto a transferir: {money_bs(monto_bs)}\n\n"
+                "Esta tasa quedará guardada en la notificación del pago."
+            )
+            ref = st.text_input("Referencia", key=f"ref_abono_usd_{cr['id']}")
+            comp = st.file_uploader("Comprobante", type=["jpg","jpeg","png","webp","pdf"], key=f"comp_abono_usd_{cr['id']}")
+            notas = st.text_area("Notas", key=f"notas_abono_usd_{cr['id']}")
+            submit = st.button("Enviar pago para validar", type="primary", use_container_width=True, key=f"btn_abono_usd_{cr['id']}")
 
         if submit:
             path = save_uploaded_file(comp, PAGOS_DIR, prefix=f"abono_credito_{cr['id']}")
