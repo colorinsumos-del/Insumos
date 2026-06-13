@@ -40,7 +40,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V2 Fix43 Usuarios Perfil"
+APP_NAME = "Sistema de Insumos al Mayor V53 Precio Especial Simple"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -739,6 +739,8 @@ def init_db():
     add_col("usuarios", "limite_credito_usd", "REAL DEFAULT 0")
     add_col("usuarios", "dias_credito", "INTEGER DEFAULT 10")
     add_col("usuarios", "ml_envio", "INTEGER DEFAULT 0")
+    add_col("usuarios", "credito_bcv_habilitado", "INTEGER DEFAULT 0")
+    add_col("usuarios", "cliente_especial", "INTEGER DEFAULT 0")
     add_col("usuarios", "id_usuario", "INTEGER DEFAULT 0")
     add_col("usuarios", "email", "TEXT")
     # Asignar id_usuario automático a usuarios existentes/importados que no lo tengan.
@@ -760,6 +762,10 @@ def init_db():
     add_col("productos", "pub_marketplace", "INTEGER DEFAULT 0")
     add_col("productos", "pub_whatsapp", "INTEGER DEFAULT 0")
     add_col("productos", "pub_web", "INTEGER DEFAULT 0")
+    add_col("productos", "maneja_precio_especial", "INTEGER DEFAULT 0")
+    add_col("productos", "precio_especial_unidad", "REAL DEFAULT 0")
+    add_col("productos", "precio_especial_docena", "REAL DEFAULT 0")
+    add_col("productos", "precio_especial_bulto", "REAL DEFAULT 0")
     add_col("productos", "link_instagram", "TEXT")
     add_col("productos", "link_mercadolibre", "TEXT")
     add_col("productos", "link_marketplace", "TEXT")
@@ -1239,7 +1245,7 @@ def actualizar_referencias_username(username_old, username_new):
     except Exception:
         pass
 
-def crear_usuario_admin(username, password, nombre, rol, telefono, rif, ciudad, direccion, email, credito_hab, ml_envio, limite, dias, activo):
+def crear_usuario_admin(username, password, nombre, rol, telefono, rif, ciudad, direccion, email, cliente_especial, credito_hab, credito_bcv_hab, ml_envio, limite, dias, activo):
     username = (username or "").strip()
     email = (email or "").strip()
     if not username or not nombre:
@@ -1249,12 +1255,12 @@ def crear_usuario_admin(username, password, nombre, rol, telefono, rif, ciudad, 
     if email and email_existe(email):
         return False, "Ese correo ya está usado por otro usuario."
     q("""INSERT INTO usuarios
-         (id_usuario,username,password_hash,nombre,rol,telefono,rif,ciudad,direccion,email,activo,tipo_precio,credito_habilitado,ml_envio,limite_credito_usd,dias_credito,creado_en)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-      (usuario_siguiente_id(), username, hash_password(password or "1234"), nombre, rol, telefono, rif, ciudad, direccion, email, 1 if activo else 0, "proveedor", 1 if credito_hab else 0, 1 if ml_envio else 0, limite, int(dias), now()))
+         (id_usuario,username,password_hash,nombre,rol,telefono,rif,ciudad,direccion,email,activo,tipo_precio,cliente_especial,credito_habilitado,credito_bcv_habilitado,ml_envio,limite_credito_usd,dias_credito,creado_en)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+      (usuario_siguiente_id(), username, hash_password(password or "1234"), nombre, rol, telefono, rif, ciudad, direccion, email, 1 if activo else 0, "proveedor", 1 if cliente_especial else 0, 1 if credito_hab else 0, 1 if credito_bcv_hab else 0, 1 if ml_envio else 0, limite, int(dias), now()))
     return True, f"Usuario creado: {nombre} ({username})."
 
-def actualizar_usuario_admin(username_original, username_new, nombre, rol, telefono, rif, ciudad, direccion, email, credito_hab, ml_envio, limite, dias, activo, password=""):
+def actualizar_usuario_admin(username_original, username_new, nombre, rol, telefono, rif, ciudad, direccion, email, cliente_especial, credito_hab, credito_bcv_hab, ml_envio, limite, dias, activo, password=""):
     username_original = (username_original or "").strip()
     username_new = (username_new or "").strip()
     email = (email or "").strip()
@@ -1273,14 +1279,14 @@ def actualizar_usuario_admin(username_original, username_new, nombre, rol, telef
 
     if password:
         q("""UPDATE usuarios SET password_hash=?, nombre=?, rol=?, telefono=?, rif=?, ciudad=?, direccion=?, email=?,
-             credito_habilitado=?, ml_envio=?, limite_credito_usd=?, dias_credito=?, activo=? WHERE username=?""",
+             cliente_especial=?, credito_habilitado=?, credito_bcv_habilitado=?, ml_envio=?, limite_credito_usd=?, dias_credito=?, activo=? WHERE username=?""",
           (hash_password(password), nombre, rol, telefono, rif, ciudad, direccion, email,
-           1 if credito_hab else 0, 1 if ml_envio else 0, limite, int(dias), 1 if activo else 0, username_new))
+           1 if cliente_especial else 0, 1 if credito_hab else 0, 1 if credito_bcv_hab else 0, 1 if ml_envio else 0, limite, int(dias), 1 if activo else 0, username_new))
     else:
         q("""UPDATE usuarios SET nombre=?, rol=?, telefono=?, rif=?, ciudad=?, direccion=?, email=?,
-             credito_habilitado=?, ml_envio=?, limite_credito_usd=?, dias_credito=?, activo=? WHERE username=?""",
+             cliente_especial=?, credito_habilitado=?, credito_bcv_habilitado=?, ml_envio=?, limite_credito_usd=?, dias_credito=?, activo=? WHERE username=?""",
           (nombre, rol, telefono, rif, ciudad, direccion, email,
-           1 if credito_hab else 0, 1 if ml_envio else 0, limite, int(dias), 1 if activo else 0, username_new))
+           1 if cliente_especial else 0, 1 if credito_hab else 0, 1 if credito_bcv_hab else 0, 1 if ml_envio else 0, limite, int(dias), 1 if activo else 0, username_new))
     return True, f"Usuario actualizado: {nombre} ({username_new})."
 
 def save_uploaded_file(uploaded, folder: Path, prefix="file"):
@@ -1408,9 +1414,21 @@ def usuarios_visibles_para(user):
         return [r["username"] for r in rows]
     return [user["username"]]
 
-def crear_pedido_desde_carrito(user, carrito, tipo_pago, metodo_pago, envio_usd, notas, cliente_extra=None, tipo_credito="usd"):
+def crear_pedido_desde_carrito(user, carrito, tipo_pago, metodo_pago, envio_usd, notas, cliente_extra=None, tipo_credito="usd", cliente_target_username=None):
     if not carrito:
         return None, "Carrito vacío."
+
+    cliente_extra = cliente_extra or {}
+    target_user = get_user(cliente_target_username) if cliente_target_username else user
+    if not target_user:
+        target_user = user
+
+    # Recalcular precios con el cliente final antes de crear el pedido.
+    # Esto permite aplicar Precio Especial si el pedido lo arma admin para un cliente especial.
+    carrito_recalc = {}
+    for k, v in carrito.items():
+        carrito_recalc[k] = recalcular_item_carrito(v, user=target_user)
+    carrito = carrito_recalc
 
     ok_stock, stock_msgs = validar_stock_carrito_woocommerce(carrito)
     if not ok_stock:
@@ -1421,20 +1439,24 @@ def crear_pedido_desde_carrito(user, carrito, tipo_pago, metodo_pago, envio_usd,
     total = subtotal + float(envio_usd or 0)
     tasa = get_tasa_proveedor()
     tasa_bcv = get_tasa_bcv()
-    cliente_extra = cliente_extra or {}
 
-    username = user["username"]
-    cliente_nombre = cliente_extra.get("cliente_nombre") or user["nombre"] or username
-    cliente_rif = cliente_extra.get("cliente_rif") or user["rif"] or ""
-    cliente_tel = cliente_extra.get("cliente_telefono") or user["telefono"] or ""
-    cliente_dir = cliente_extra.get("cliente_direccion") or user["direccion"] or ""
+    username = target_user["username"]
+    cliente_nombre = cliente_extra.get("cliente_nombre") or target_user["nombre"] or username
+    cliente_rif = cliente_extra.get("cliente_rif") or target_user["rif"] or ""
+    cliente_tel = cliente_extra.get("cliente_telefono") or target_user["telefono"] or ""
+    cliente_dir = cliente_extra.get("cliente_direccion") or target_user["direccion"] or ""
 
     credito_tipo = "bcv" if tipo_pago == "credito" and str(tipo_credito).lower() == "bcv" else "usd"
     total_bs_base = total * tasa
     total_bcv_credito = (total_bs_base / tasa_bcv) if credito_tipo == "bcv" and tasa_bcv > 0 else 0.0
 
-    if credito_tipo == "bcv" and tasa_bcv <= 0:
-        return None, "No se puede crear Crédito BCV porque la tasa BCV está en cero. Actualiza la tasa BCV primero."
+    if tipo_pago == "credito" and user["rol"] != "admin" and int(target_user["credito_habilitado"] or 0) != 1:
+        return None, "Este cliente no tiene crédito habilitado."
+    if credito_tipo == "bcv":
+        if int(target_user["credito_bcv_habilitado"] if "credito_bcv_habilitado" in target_user.keys() and target_user["credito_bcv_habilitado"] is not None else 0) != 1 and user["rol"] != "admin":
+            return None, "Este cliente no tiene Crédito BCV habilitado."
+        if tasa_bcv <= 0:
+            return None, "No se puede crear Crédito BCV porque la tasa BCV está en cero. Actualiza la tasa BCV primero."
 
     q("""INSERT INTO pedidos
          (fecha, username, cliente_nombre, cliente_rif, cliente_telefono, cliente_direccion, items,
@@ -1450,7 +1472,7 @@ def crear_pedido_desde_carrito(user, carrito, tipo_pago, metodo_pago, envio_usd,
 
     credito_id = None
     if tipo_pago == "credito":
-        dias = int(user["dias_credito"] or parse_float(get_config("dias_credito_default", "10"), 10))
+        dias = int(target_user["dias_credito"] or parse_float(get_config("dias_credito_default", "10"), 10))
         venc = (datetime.now() + timedelta(days=dias)).strftime("%d/%m/%Y")
         if credito_tipo == "bcv":
             nota_credito = (
@@ -1479,7 +1501,7 @@ def crear_pedido_desde_carrito(user, carrito, tipo_pago, metodo_pago, envio_usd,
     else:
         q("UPDATE pedidos SET status='Pendiente de pago' WHERE id=?", (pedido_id,))
 
-    limpiar_carrito(username)
+    limpiar_carrito(user["username"])
     return pedido_id, "Pedido creado."
 
 def aplicar_abono_validado(abono_id, admin_username):
@@ -1640,6 +1662,57 @@ def cliente_usa_ml_envio(user):
     except Exception:
         return False
 
+def usuario_es_cliente_especial(user):
+    try:
+        return int(user["cliente_especial"] if "cliente_especial" in user.keys() and user["cliente_especial"] is not None else 0) == 1
+    except Exception:
+        try:
+            return int(user.get("cliente_especial") or 0) == 1
+        except Exception:
+            return False
+
+def producto_maneja_precio_especial(prod):
+    try:
+        return int(prod["maneja_precio_especial"] if "maneja_precio_especial" in prod.keys() and prod["maneja_precio_especial"] is not None else 0) == 1
+    except Exception:
+        try:
+            return int(prod.get("maneja_precio_especial") or 0) == 1
+        except Exception:
+            return False
+
+def producto_con_precio_para_usuario(prod, user=None):
+    """
+    Devuelve una copia dict del producto con precios efectivos.
+    Si usuario es cliente especial y producto tiene precio especial activo,
+    reemplaza unidad/intermedia/bulto solo si los precios especiales son > 0.
+    """
+    try:
+        data = dict(prod)
+    except Exception:
+        data = {k: prod[k] for k in prod.keys()}
+
+    data["_precio_especial_aplicado"] = False
+    if user is None:
+        return data
+
+    if usuario_es_cliente_especial(user) and producto_maneja_precio_especial(prod):
+        try:
+            pu = float(data.get("precio_especial_unidad") or 0)
+            pd = float(data.get("precio_especial_docena") or 0)
+            pb = float(data.get("precio_especial_bulto") or 0)
+            if pu > 0:
+                data["precio_unidad"] = pu
+                data["_precio_especial_aplicado"] = True
+            if pd > 0:
+                data["precio_docena"] = pd
+                data["_precio_especial_aplicado"] = True
+            if pb > 0:
+                data["precio_bulto"] = pb
+                data["_precio_especial_aplicado"] = True
+        except Exception:
+            pass
+    return data
+
 
 def producto_intermedia_nombre(prod):
     """Nombre comercial de la presentación intermedia: Docena, Pack, Caja, Paquete."""
@@ -1718,21 +1791,23 @@ def get_producto_row(sku):
     rows = q("SELECT * FROM productos WHERE sku=?", (sku,), fetch=True)
     return rows[0] if rows else None
 
-def recalcular_item_carrito(item, nueva_cantidad=None):
+def recalcular_item_carrito(item, nueva_cantidad=None, user=None):
     """
-    Recalcula un item del carrito usando los precios actuales del producto.
-    Evita errores visuales como 12 x precio promedio.
+    Recalcula un item del carrito usando precios actuales del producto.
+    Si se pasa user y el user es cliente especial, aplica precio especial del producto.
     """
     sku = item.get("sku")
     prod = get_producto_row(sku)
     if not prod:
         return item
 
+    prod_precio = producto_con_precio_para_usuario(prod, user)
+
     cantidad = int(nueva_cantidad if nueva_cantidad is not None else item.get("cantidad_presentacion", 1))
     cantidad = max(1, cantidad)
     presentacion = item.get("presentacion", "unidad")
 
-    precio_calc = calcular_precio_inteligente(prod, presentacion, cantidad)
+    precio_calc = calcular_precio_inteligente(prod_precio, presentacion, cantidad)
     item["cantidad_presentacion"] = cantidad
     item["equivalencia"] = int(precio_calc["equivalencia"])
     item["unidades_base_total"] = int(precio_calc["unidades_base_total"])
@@ -1740,12 +1815,16 @@ def recalcular_item_carrito(item, nueva_cantidad=None):
     item["precio_total"] = float(precio_calc["precio_total"])
     item["escala_aplicada"] = precio_calc["escala_aplicada"]
     item["detalle_precio"] = precio_calc.get("detalle_precio", precio_calc["escala_aplicada"])
-    item["presentacion_nombre"] = precio_calc.get("presentacion_nombre", producto_intermedia_nombre(prod) if presentacion == "docena" else presentacion.title())
-    item["presentacion_label"] = precio_calc.get("presentacion_label", producto_intermedia_label(prod) if presentacion == "docena" else presentacion.title())
+    item["presentacion_nombre"] = precio_calc.get("presentacion_nombre", producto_intermedia_nombre(prod_precio) if presentacion == "docena" else presentacion.title())
+    item["presentacion_label"] = precio_calc.get("presentacion_label", producto_intermedia_label(prod_precio) if presentacion == "docena" else presentacion.title())
     item["peso_total_kg"] = float(prod["peso_unidad_kg"] or 0) * int(precio_calc["unidades_base_total"])
     item["imagen_url"] = prod["wc_imagen_url"]
     item["desc"] = prod["descripcion"]
+    item["precio_especial_aplicado"] = bool(prod_precio.get("_precio_especial_aplicado", False))
+    if item["precio_especial_aplicado"]:
+        item["detalle_precio"] = f"{item['detalle_precio']} · precio especial"
     return item
+
 
 def texto_linea_carrito(item):
     presentacion = item.get("presentacion", "unidad")
@@ -2345,7 +2424,7 @@ def admin_productos():
             params.extend([f"%{bus}%", f"%{bus}%"])
         sql += " ORDER BY p.activo DESC, c.orden, p.descripcion"
         df = pd.read_sql_query(sql, get_conn(), params=params)
-        st.dataframe(df[["sku","descripcion","categoria","precio_unidad","presentacion_intermedia_nombre","presentacion_intermedia_cantidad","precio_docena","precio_bulto","bulto_contiene","wc_stock","activo","ultima_sync"]], use_container_width=True, hide_index=True)
+        st.dataframe(df[["sku","descripcion","categoria","precio_unidad","presentacion_intermedia_nombre","presentacion_intermedia_cantidad","precio_docena","precio_bulto","maneja_precio_especial","precio_especial_unidad","precio_especial_docena","precio_especial_bulto","bulto_contiene","wc_stock","activo","ultima_sync"]], use_container_width=True, hide_index=True)
 
     with tab_form:
         st.subheader("Crear o editar producto")
@@ -2373,6 +2452,13 @@ def admin_productos():
             precio_unidad = c1.number_input("Precio unidad USD", min_value=0.0, value=float(prod["precio_unidad"] if prod else 0), step=0.01)
             precio_docena = c2.number_input("Precio presentación intermedia c/u USD", min_value=0.0, value=float(prod["precio_docena"] if prod else 0), step=0.01, help="Usa este campo para Docena, Pack x10, Caja, Paquete, etc. Es precio unitario dentro de esa presentación.")
             precio_bulto = c3.number_input("Precio bulto c/u USD", min_value=0.0, value=float(prod["precio_bulto"] if prod else 0), step=0.01)
+
+            st.markdown("#### Precio especial opcional")
+            pe0, pe1, pe2, pe3 = st.columns(4)
+            maneja_precio_especial = pe0.checkbox("Maneja precio especial", value=bool(prod["maneja_precio_especial"]) if prod and "maneja_precio_especial" in prod.keys() else False)
+            precio_especial_unidad = pe1.number_input("Especial unidad USD", min_value=0.0, value=float(prod["precio_especial_unidad"] if prod and "precio_especial_unidad" in prod.keys() else 0), step=0.01, disabled=not maneja_precio_especial)
+            precio_especial_docena = pe2.number_input("Especial presentación c/u USD", min_value=0.0, value=float(prod["precio_especial_docena"] if prod and "precio_especial_docena" in prod.keys() else 0), step=0.01, disabled=not maneja_precio_especial)
+            precio_especial_bulto = pe3.number_input("Especial bulto c/u USD", min_value=0.0, value=float(prod["precio_especial_bulto"] if prod and "precio_especial_bulto" in prod.keys() else 0), step=0.01, disabled=not maneja_precio_especial)
 
             c4, c5, c6, c7 = st.columns(4)
             maneja_docena = c4.checkbox("Maneja presentación intermedia", value=bool(prod["maneja_docena"]) if prod else True)
@@ -2419,12 +2505,14 @@ def admin_productos():
                 cat_id = cat_options[cat_sel]
                 q("""INSERT INTO productos
                      (sku, descripcion, categoria_id, unidad_base, precio_unidad, precio_docena, precio_bulto,
-                      bulto_contiene, maneja_docena, maneja_bulto, presentacion_intermedia_nombre, presentacion_intermedia_cantidad, peso_unidad_kg, activo,
+                      bulto_contiene, maneja_docena, maneja_bulto, presentacion_intermedia_nombre, presentacion_intermedia_cantidad,
+                      maneja_precio_especial, precio_especial_unidad, precio_especial_docena, precio_especial_bulto,
+                      peso_unidad_kg, activo,
                       costo_proveedor_unitario, envio_costo_bulto, otros_costos_bulto, margen_minimo_pct,
                       pub_web, pub_instagram, pub_mercadolibre, pub_marketplace, pub_whatsapp,
                       link_instagram, link_mercadolibre, link_marketplace, notas_publicacion,
                       creado_en, actualizado_en)
-                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                      ON CONFLICT(sku) DO UPDATE SET
                      descripcion=excluded.descripcion,
                      categoria_id=excluded.categoria_id,
@@ -2437,6 +2525,10 @@ def admin_productos():
                      maneja_bulto=excluded.maneja_bulto,
                      presentacion_intermedia_nombre=excluded.presentacion_intermedia_nombre,
                      presentacion_intermedia_cantidad=excluded.presentacion_intermedia_cantidad,
+                     maneja_precio_especial=excluded.maneja_precio_especial,
+                     precio_especial_unidad=excluded.precio_especial_unidad,
+                     precio_especial_docena=excluded.precio_especial_docena,
+                     precio_especial_bulto=excluded.precio_especial_bulto,
                      peso_unidad_kg=excluded.peso_unidad_kg,
                      activo=excluded.activo,
                      costo_proveedor_unitario=excluded.costo_proveedor_unitario,
@@ -2455,6 +2547,7 @@ def admin_productos():
                      actualizado_en=excluded.actualizado_en""",
                   (sku_e.strip(), desc.strip(), cat_id, unidad_base, precio_unidad, precio_docena, precio_bulto,
                    int(bulto_contiene), 1 if maneja_docena else 0, 1 if maneja_bulto else 0, presentacion_intermedia_nombre, int(presentacion_intermedia_cantidad),
+                   1 if maneja_precio_especial else 0, precio_especial_unidad, precio_especial_docena, precio_especial_bulto,
                    peso, 1 if activo else 0,
                    costo_proveedor_unitario, envio_costo_bulto, otros_costos_bulto, margen_minimo_pct,
                    1 if pub_web else 0, 1 if pub_instagram else 0, 1 if pub_mercadolibre else 0, 1 if pub_marketplace else 0, 1 if pub_whatsapp else 0,
@@ -2532,6 +2625,9 @@ def mi_perfil():
         st.info(
             f"Usuario de acceso: {user_actual['username']}\n\n"
             f"Rol: {user_actual['rol']}\n\n"
+            f"Condición especial: {'Activa' if int(user_actual['cliente_especial'] if 'cliente_especial' in user_actual.keys() and user_actual['cliente_especial'] is not None else 0) == 1 else 'No activa'}\n\n"
+            f"Crédito normal: {'Activo' if int(user_actual['credito_habilitado'] or 0) == 1 else 'No activo'}\n\n"
+            f"Crédito BCV: {'Activo' if int(user_actual['credito_bcv_habilitado'] if 'credito_bcv_habilitado' in user_actual.keys() and user_actual['credito_bcv_habilitado'] is not None else 0) == 1 else 'No activo'}\n\n"
             "Para cambiar usuario, rol, crédito, límite o días de crédito, contacta al administrador."
         )
 
@@ -2565,7 +2661,7 @@ def admin_usuarios():
 
     with tab1:
         df = pd.read_sql_query(
-            "SELECT id_usuario,username,email,nombre,rol,telefono,rif,ciudad,activo,credito_habilitado,ml_envio,limite_credito_usd,dias_credito FROM usuarios ORDER BY rol,nombre",
+            "SELECT id_usuario,username,email,nombre,rol,telefono,rif,ciudad,activo,cliente_especial,credito_habilitado,credito_bcv_habilitado,ml_envio,limite_credito_usd,dias_credito FROM usuarios ORDER BY rol,nombre",
             get_conn()
         )
         st.dataframe(df, use_container_width=True, hide_index=True)
@@ -2678,11 +2774,13 @@ def admin_usuarios():
             ciudad = st.text_input("Ciudad", value=edit_row["ciudad"] if edit_row else "")
             direccion = st.text_area("Dirección", value=edit_row["direccion"] if edit_row else "")
 
-            c7, c8, c9, c10 = st.columns(4)
-            credito_hab = c7.checkbox("Crédito habilitado", value=bool(edit_row["credito_habilitado"]) if edit_row else False)
-            ml_envio = c8.checkbox("ML / ENVÍO", value=bool(edit_row["ml_envio"]) if edit_row else False, help="Activa cálculo sugerido de envío por peso para clientes MercadoLibre o fuera del estado.")
-            limite = c9.number_input("Límite crédito USD", min_value=0.0, value=float(edit_row["limite_credito_usd"] if edit_row else 0), step=1.0)
-            dias = c10.number_input("Días crédito", min_value=1, max_value=90, value=int(edit_row["dias_credito"] if edit_row else parse_float(get_config("dias_credito_default","10"), 10)))
+            c7, c8, c9, c10, c11, c12 = st.columns(6)
+            cliente_especial = c7.checkbox("Cliente especial", value=bool(edit_row["cliente_especial"]) if edit_row and "cliente_especial" in edit_row.keys() else False, help="Activa precios especiales en productos que los tengan configurados.")
+            credito_hab = c8.checkbox("Crédito habilitado", value=bool(edit_row["credito_habilitado"]) if edit_row else False)
+            credito_bcv_hab = c9.checkbox("Crédito BCV habilitado", value=bool(edit_row["credito_bcv_habilitado"]) if edit_row and "credito_bcv_habilitado" in edit_row.keys() else False, help="Permite que este cliente vea y use la modalidad Crédito BCV.")
+            ml_envio = c10.checkbox("ML / ENVÍO", value=bool(edit_row["ml_envio"]) if edit_row else False, help="Activa cálculo sugerido de envío por peso para clientes MercadoLibre o fuera del estado.")
+            limite = c11.number_input("Límite crédito USD", min_value=0.0, value=float(edit_row["limite_credito_usd"] if edit_row else 0), step=1.0)
+            dias = c12.number_input("Días crédito", min_value=1, max_value=90, value=int(edit_row["dias_credito"] if edit_row else parse_float(get_config("dias_credito_default","10"), 10)))
             activo = st.checkbox("Activo", value=bool(edit_row["activo"]) if edit_row else True)
             password = st.text_input("Contraseña nueva / inicial", type="password", help="Déjala vacía para conservar la actual si estás editando. En usuarios nuevos, si la dejas vacía será 1234.")
 
@@ -2691,7 +2789,7 @@ def admin_usuarios():
             submit_update = cbtn2.form_submit_button("💾 Actualizar usuario existente", type="primary", disabled=(modo != "Actualizar usuario existente"))
 
         if submit_create:
-            ok, msg = crear_usuario_admin(username, password, nombre, rol, telefono, rif, ciudad, direccion, email, credito_hab, ml_envio, limite, dias, activo)
+            ok, msg = crear_usuario_admin(username, password, nombre, rol, telefono, rif, ciudad, direccion, email, cliente_especial, credito_hab, credito_bcv_hab, ml_envio, limite, dias, activo)
             if ok:
                 set_feedback(msg, "success")
                 st.rerun()
@@ -2699,7 +2797,7 @@ def admin_usuarios():
                 st.error(msg)
 
         if submit_update:
-            ok, msg = actualizar_usuario_admin(username_original, username, nombre, rol, telefono, rif, ciudad, direccion, email, credito_hab, ml_envio, limite, dias, activo, password)
+            ok, msg = actualizar_usuario_admin(username_original, username, nombre, rol, telefono, rif, ciudad, direccion, email, cliente_especial, credito_hab, credito_bcv_hab, ml_envio, limite, dias, activo, password)
             if ok:
                 set_feedback(msg, "success")
                 st.rerun()
@@ -2981,6 +3079,65 @@ def mis_pedidos():
                     st.rerun()
                 else:
                     st.error(msg)
+
+        st.markdown("---")
+        st.subheader("Asignar / transferir pedido")
+        usuarios_dest = q("SELECT username,nombre FROM usuarios WHERE activo=1 ORDER BY nombre,username", fetch=True)
+        if usuarios_dest:
+            opts_dest = {f"{u['nombre'] or u['username']} — {u['username']}": u["username"] for u in usuarios_dest}
+            sel_dest = st.selectbox("Cliente destino", list(opts_dest.keys()), key=f"transfer_cliente_{pid}")
+            confirmar_transfer = st.checkbox("Confirmar transferencia de este pedido", key=f"confirm_transfer_{pid}")
+            if st.button("🔁 Transferir pedido a cliente", disabled=not confirmar_transfer, use_container_width=True, key=f"btn_transfer_pedido_{pid}"):
+                ok, msg = transferir_pedido_a_cliente(int(pid), opts_dest[sel_dest])
+                st.success(msg) if ok else st.error(msg)
+                if ok:
+                    st.rerun()
+
+        st.markdown("---")
+        st.subheader("Editar pedido")
+        if not pedido_permite_edicion(p):
+            st.warning("Este pedido no puede editarse por su estado actual. Para editarlo, primero cámbialo a un estado pendiente si corresponde.")
+        else:
+            abonos_validados = q("SELECT COUNT(*) AS n FROM abonos WHERE pedido_id=? AND status='Validado'", (int(pid),), fetch=True)[0]["n"]
+            if abonos_validados:
+                st.warning("Este pedido tiene abonos validados. El sistema no permitirá que el nuevo total quede por debajo de lo abonado.")
+
+            items = json.loads(p["items"] or "{}")
+            items_edit = {}
+            with st.form(f"form_editar_pedido_{pid}"):
+                st.caption("Puedes quitar líneas o ajustar cantidades. Al guardar se recalculan totales y crédito asociado si aplica.")
+                for k, item in items.items():
+                    st.markdown(f"**{item.get('desc','Item')}**")
+                    c_qty, c_keep = st.columns([1, 1])
+                    qty = c_qty.number_input(
+                        f"Cantidad ({presentacion_display_item(item)})",
+                        min_value=0,
+                        max_value=9999,
+                        value=int(item.get("cantidad_presentacion", 1)),
+                        step=1,
+                        key=f"edit_qty_{pid}_{k}"
+                    )
+                    keep = c_keep.checkbox("Mantener item", value=True, key=f"edit_keep_{pid}_{k}")
+                    nuevo_item = dict(item)
+                    nuevo_item["cantidad_presentacion"] = int(qty)
+                    if keep and int(qty) > 0:
+                        items_edit[k] = nuevo_item
+
+                cenv, cmet = st.columns(2)
+                envio_edit = cenv.number_input("Envío USD", min_value=0.0, value=float(p["envio_usd"] or 0), step=0.5)
+                metodo_edit = cmet.selectbox(
+                    "Método de pago",
+                    ["Por confirmar", "Divisas", "Transferencia", "Pago móvil", "Zelle", "Zinli", "Binance", "Otro"],
+                    index=(["Por confirmar", "Divisas", "Transferencia", "Pago móvil", "Zelle", "Zinli", "Binance", "Otro"].index(p["metodo_pago"]) if p["metodo_pago"] in ["Por confirmar", "Divisas", "Transferencia", "Pago móvil", "Zelle", "Zinli", "Binance", "Otro"] else 0)
+                )
+                notas_edit = st.text_area("Notas", value=p["notas"] or "")
+                submit_edit = st.form_submit_button("💾 Guardar cambios y recalcular", type="primary")
+
+            if submit_edit:
+                ok, msg = recalcular_pedido_y_credito(int(pid), items_edit, envio_edit, metodo_pago=metodo_edit, notas=notas_edit)
+                st.success(msg) if ok else st.error(msg)
+                if ok:
+                    st.rerun()
 
 
 def mis_creditos():
@@ -3859,6 +4016,7 @@ def dialog_imagen(nombre, sku, url):
         st.info("Este producto no tiene imagen sincronizada.")
 
 def render_card_producto(prod, user):
+    prod = producto_con_precio_para_usuario(prod, user)
     tasa = get_tasa_proveedor()
     stock = int(prod["wc_stock"] or 0)
     disp = disponibilidad(prod)
@@ -3896,6 +4054,8 @@ def render_card_producto(prod, user):
         else:
             st.markdown('<span class="badge badge-no">Sin stock</span>', unsafe_allow_html=True)
 
+        if prod.get("_precio_especial_aplicado"):
+            st.markdown('<span class="badge badge-ok">⭐ Precio especial aplicado</span>', unsafe_allow_html=True)
 
         st.markdown('<div class="catalog-list-prices">', unsafe_allow_html=True)
         st.markdown(f"<div class='price-main'>Unidad: {money_usd(prod['precio_unidad'])}</div>", unsafe_allow_html=True)
@@ -4003,7 +4163,7 @@ def render_card_producto(prod, user):
                 "peso_total_kg": float(prod["peso_unidad_kg"] or 0) * int(unidades_base_total),
                 "imagen_url": prod["wc_imagen_url"],
             }
-            carrito[key] = recalcular_item_carrito(item_tmp, cantidad_final)
+            carrito[key] = recalcular_item_carrito(item_tmp, cantidad_final, user=user)
             guardar_carrito(user["username"], carrito)
             n_items, n_unidades, total_carrito = carrito_resumen_texto(user["username"])
             cantidad_presentacion_agregada = int(cantidad)
@@ -4096,6 +4256,106 @@ def tienda():
         render_card_producto(prod, user)
 
 
+
+def pedido_permite_edicion(pedido):
+    status = str(pedido["status"] or "").lower()
+    bloqueados = ["finalizado", "pagado", "procesado en pos", "cancelado", "anulado"]
+    return not any(b in status for b in bloqueados)
+
+def cliente_resumen_para_pedido(username):
+    u = get_user(username)
+    if not u:
+        return {"username": username, "cliente_nombre": username, "cliente_rif": "", "cliente_telefono": "", "cliente_direccion": ""}
+    return {
+        "username": u["username"],
+        "cliente_nombre": u["nombre"] or u["username"],
+        "cliente_rif": u["rif"] or "",
+        "cliente_telefono": u["telefono"] or "",
+        "cliente_direccion": u["direccion"] or "",
+    }
+
+def transferir_pedido_a_cliente(pedido_id, username_destino):
+    rows = q("SELECT * FROM pedidos WHERE id=?", (int(pedido_id),), fetch=True)
+    if not rows:
+        return False, "Pedido no encontrado."
+    ped = rows[0]
+    dest = get_user(username_destino)
+    if not dest:
+        return False, "Cliente destino no encontrado."
+
+    datos = cliente_resumen_para_pedido(username_destino)
+    q("""UPDATE pedidos SET username=?, cliente_nombre=?, cliente_rif=?, cliente_telefono=?, cliente_direccion=? WHERE id=?""",
+      (datos["username"], datos["cliente_nombre"], datos["cliente_rif"], datos["cliente_telefono"], datos["cliente_direccion"], int(pedido_id)))
+
+    if ped["credito_id"]:
+        q("UPDATE creditos SET username=?, cliente_nombre=? WHERE id=?",
+          (datos["username"], datos["cliente_nombre"], int(ped["credito_id"])))
+        q("UPDATE abonos SET username=? WHERE pedido_id=?", (datos["username"], int(pedido_id)))
+
+    return True, f"Pedido #{pedido_id} transferido a {datos['cliente_nombre']}."
+
+def recalcular_pedido_y_credito(pedido_id, items, envio_usd, metodo_pago=None, notas=None, recalcular_credito=True):
+    rows = q("SELECT * FROM pedidos WHERE id=?", (int(pedido_id),), fetch=True)
+    if not rows:
+        return False, "Pedido no encontrado."
+    ped = rows[0]
+    if not pedido_permite_edicion(ped):
+        return False, "Este pedido no puede editarse por su estado actual."
+
+    # Recalcular cada item para respetar precios vigentes y condición comercial del cliente del pedido.
+    pedido_user = get_user(ped["username"])
+    carrito_tmp = {}
+    for k, item in items.items():
+        try:
+            nuevo = recalcular_item_carrito(item, user=pedido_user)
+            if int(nuevo.get("cantidad_presentacion", 1)) > 0:
+                carrito_tmp[k] = nuevo
+        except Exception:
+            pass
+    if not carrito_tmp:
+        return False, "El pedido no puede quedar sin items."
+
+    t = calcular_carrito(carrito_tmp)
+    subtotal = float(t["subtotal"])
+    envio_usd = float(envio_usd or 0)
+    total = subtotal + envio_usd
+    tasa = float(ped["tasa_proveedor"] or get_tasa_proveedor())
+    # Para edición se conserva tasa BCV original por defecto.
+    tasa_bcv = float(ped["tasa_bcv"] or get_tasa_bcv())
+    total_bs = total * tasa
+
+    q("""UPDATE pedidos SET items=?, subtotal_usd=?, envio_usd=?, total_usd=?, total_bs_proveedor=?, peso_total_kg=?,
+         metodo_pago=COALESCE(?, metodo_pago), notas=COALESCE(?, notas) WHERE id=?""",
+      (json.dumps(carrito_tmp, ensure_ascii=False), subtotal, envio_usd, total, total_bs, t["peso_total_kg"],
+       metodo_pago, notas, int(pedido_id)))
+
+    if recalcular_credito and ped["credito_id"] and str(ped["tipo_pago"]).lower() == "credito":
+        cr_rows = q("SELECT * FROM creditos WHERE id=?", (int(ped["credito_id"]),), fetch=True)
+        if cr_rows:
+            cr = cr_rows[0]
+            validados = q("SELECT COALESCE(SUM(CASE WHEN COALESCE(tipo_credito,'usd')='bcv' THEN COALESCE(monto_bcv, monto_usd, 0) ELSE COALESCE(monto_usd,0) END),0) AS total FROM abonos WHERE credito_id=? AND status='Validado'", (int(cr["id"]),), fetch=True)[0]["total"]
+            abonado = float(validados or 0)
+            tipo_credito = str(cr["tipo_credito"] or ped["credito_tipo"] or "usd").lower()
+
+            if tipo_credito == "bcv":
+                nuevo_monto = (total_bs / tasa_bcv) if tasa_bcv > 0 else 0.0
+                if nuevo_monto + 0.009 < abonado:
+                    return False, "No se puede guardar: el nuevo total BCV queda por debajo de lo ya abonado/validado."
+                nuevo_saldo = max(0.0, nuevo_monto - abonado)
+                nuevo_status = "Pagado" if nuevo_saldo <= 0.009 else ("Parcial" if abonado > 0 else "Pendiente")
+                q("""UPDATE creditos SET monto_usd=?, saldo_usd=?, monto_bcv=?, saldo_bcv=?, total_bs_base=?, tasa_proveedor=?, tasa_bcv_creacion=?, status=? WHERE id=?""",
+                  (nuevo_monto, nuevo_saldo, nuevo_monto, nuevo_saldo, total_bs, tasa, tasa_bcv, nuevo_status, int(cr["id"])))
+                q("UPDATE pedidos SET total_bcv_credito=? WHERE id=?", (nuevo_monto, int(pedido_id)))
+            else:
+                nuevo_monto = total
+                if nuevo_monto + 0.009 < abonado:
+                    return False, "No se puede guardar: el nuevo total queda por debajo de lo ya abonado/validado."
+                nuevo_saldo = max(0.0, nuevo_monto - abonado)
+                nuevo_status = "Pagado" if nuevo_saldo <= 0.009 else ("Parcial" if abonado > 0 else "Pendiente")
+                q("UPDATE creditos SET monto_usd=?, saldo_usd=?, total_bs_base=?, tasa_proveedor=?, status=? WHERE id=?",
+                  (nuevo_monto, nuevo_saldo, total_bs, tasa, nuevo_status, int(cr["id"])))
+    return True, "Pedido recalculado correctamente."
+
 def carrito_view():
     st.title("🛒 Carrito")
     user = get_user(st.session_state.user["username"])
@@ -4110,7 +4370,7 @@ def carrito_view():
 
     for key, item in list(carrito.items()):
         # Recalcula silenciosamente para mantener precios actuales y corregir visual.
-        item = recalcular_item_carrito(item)
+        item = recalcular_item_carrito(item, user=user)
         carrito[key] = item
         guardar_carrito(user["username"], carrito)
 
@@ -4188,23 +4448,51 @@ def carrito_view():
 
     st.markdown("### Procesar pedido")
 
-    # Estado temporal del cálculo BCV. Si el carrito cambia, se obliga a recalcular.
+    # Admin puede armar el carrito desde su usuario y asignar el pedido a un cliente final.
+    cliente_pedido = user
+    if user["rol"] == "admin":
+        usuarios_cliente = q("SELECT username,nombre,telefono,rif FROM usuarios WHERE activo=1 ORDER BY nombre,username", fetch=True)
+        opts_cliente = ["Usar mi usuario admin"] + [f"{u['nombre'] or u['username']} — {u['username']}" for u in usuarios_cliente]
+        mapa_cliente = {f"{u['nombre'] or u['username']} — {u['username']}": u["username"] for u in usuarios_cliente}
+        sel_cliente = st.selectbox("Pedido para cliente", opts_cliente, key="pedido_para_cliente_admin")
+        if sel_cliente != "Usar mi usuario admin":
+            cliente_pedido = get_user(mapa_cliente[sel_cliente]) or user
+            st.success(f"El pedido se creará a nombre de: {cliente_pedido['nombre'] or cliente_pedido['username']}")
+        else:
+            st.caption("El pedido se creará a nombre del usuario admin actual.")
+    else:
+        st.caption(f"El pedido se creará a nombre de: {user['nombre'] or user['username']}")
+
     if "_credito_bcv_calc" not in st.session_state:
         st.session_state["_credito_bcv_calc"] = None
 
-    # IMPORTANTE:
-    # Este bloque NO usa st.form porque Streamlit no actualiza los valores internos
-    # hasta presionar un botón del formulario. Eso impedía habilitar correctamente
-    # Calcular crédito BCV / Crear pedido.
     st.markdown('<div class="card">', unsafe_allow_html=True)
+
+    opciones_tipo_operacion = ["Contado"]
+    credito_normal_activo = user["rol"] == "admin" or int(cliente_pedido["credito_habilitado"] or 0) == 1
+    credito_bcv_activo = user["rol"] == "admin" or int(cliente_pedido["credito_bcv_habilitado"] if "credito_bcv_habilitado" in cliente_pedido.keys() and cliente_pedido["credito_bcv_habilitado"] is not None else 0) == 1
+
+    if credito_normal_activo:
+        opciones_tipo_operacion.append("Crédito en divisas")
+    if credito_bcv_activo:
+        opciones_tipo_operacion.append("Crédito BCV")
+
+    tipo_actual_guardado = st.session_state.get("tipo_operacion_pedido", "Contado")
+    if tipo_actual_guardado not in opciones_tipo_operacion:
+        st.session_state["tipo_operacion_pedido"] = "Contado"
 
     tipo_operacion = st.radio(
         "Tipo de operación",
-        ["Contado", "Crédito en divisas", "Crédito BCV"],
+        opciones_tipo_operacion,
         horizontal=True,
         help="Selecciona el flujo exacto antes de crear el pedido.",
         key="tipo_operacion_pedido"
     )
+
+    if user["rol"] != "admin" and not credito_bcv_activo:
+        st.caption("Crédito BCV no está habilitado para tu usuario.")
+    if user["rol"] == "admin":
+        st.caption("Como admin puedes crear crédito para un cliente seleccionado. El pedido y el crédito quedarán a nombre de ese cliente.")
 
     metodo_pago = st.selectbox(
         "Método de pago",
@@ -4212,7 +4500,7 @@ def carrito_view():
         key="metodo_pago_pedido"
     )
 
-    if cliente_usa_ml_envio(user):
+    if cliente_usa_ml_envio(cliente_pedido):
         envio_pedido = st.number_input(
             "Envío a cobrar USD",
             min_value=0.0,
@@ -4226,17 +4514,21 @@ def carrito_view():
 
     notas_pedido = st.text_area("Notas del pedido", key="notas_pedido_procesar")
 
-    total_preview_usd = float(t["subtotal"]) + float(envio_pedido or 0)
+    carrito_preview = {k: recalcular_item_carrito(v, user=cliente_pedido) for k, v in carrito.items()}
+    t_preview = calcular_carrito(carrito_preview)
+    total_preview_usd = float(t_preview["subtotal"]) + float(envio_pedido or 0)
     tasa_prov_preview = get_tasa_proveedor()
     tasa_bcv_preview = get_tasa_bcv()
     total_preview_bs = total_preview_usd * tasa_prov_preview
     credito_bcv_preview = total_preview_bs / tasa_bcv_preview if tasa_bcv_preview else 0
+    if usuario_es_cliente_especial(cliente_pedido) and any(v.get("precio_especial_aplicado") for v in carrito_preview.values()):
+        st.success("⭐ Precio especial aplicado para este cliente en uno o más productos del pedido.")
 
     metodo_ok = metodo_pago != "Por confirmar"
     credito_habilitado_ok = not (
         tipo_operacion in ["Crédito en divisas", "Crédito BCV"]
         and user["rol"] != "admin"
-        and int(user["credito_habilitado"] or 0) != 1
+        and int(cliente_pedido["credito_habilitado"] or 0) != 1
     )
 
     st.markdown("### Revisión antes de continuar")
@@ -4248,6 +4540,7 @@ def carrito_view():
         if metodo_pago in ["Transferencia", "Pago móvil"]:
             st.info(
                 f"Pago en Bs seleccionado.\n\n"
+                f"Cliente: {cliente_pedido['nombre'] or cliente_pedido['username']}\n\n"
                 f"Total del pedido: {money_usd(total_preview_usd)}\n\n"
                 f"Tasa proveedor actual: {tasa_prov_preview:,.2f}\n\n"
                 f"Cliente debe transferir: {money_bs(total_preview_bs)}"
@@ -4255,27 +4548,30 @@ def carrito_view():
         elif metodo_pago in ["Divisas", "Zelle", "Zinli", "Binance"]:
             st.info(
                 f"Pago en divisas seleccionado.\n\n"
+                f"Cliente: {cliente_pedido['nombre'] or cliente_pedido['username']}\n\n"
                 f"Total a cancelar: {money_usd(total_preview_usd)} por {metodo_pago}."
             )
         elif metodo_pago == "Otro":
             st.info(
                 f"Método de pago Otro.\n\n"
+                f"Cliente: {cliente_pedido['nombre'] or cliente_pedido['username']}\n\n"
                 f"Total del pedido: {money_usd(total_preview_usd)}\n\n"
                 f"Referencia en Bs a tasa proveedor: {money_bs(total_preview_bs)}"
             )
 
     elif tipo_operacion == "Crédito en divisas":
         if not credito_habilitado_ok:
-            st.warning("Tu usuario no tiene crédito habilitado. El administrador debe activarlo.")
+            st.warning("Este cliente no tiene crédito habilitado.")
         st.info(
             f"Crédito en divisas reales.\n\n"
+            f"Cliente: {cliente_pedido['nombre'] or cliente_pedido['username']}\n\n"
             f"Saldo que se generará: {money_usd(total_preview_usd)}\n\n"
             f"Referencia en Bs hoy: {money_bs(total_preview_usd * tasa_prov_preview)}"
         )
 
     else:
         if not credito_habilitado_ok:
-            st.warning("Tu usuario no tiene crédito habilitado. El administrador debe activarlo.")
+            st.warning("Este cliente no tiene crédito habilitado.")
         if tasa_bcv_preview <= 0:
             st.error("La tasa BCV está en cero. Actualízala antes de calcular Crédito BCV.")
         st.warning(
@@ -4286,6 +4582,7 @@ def carrito_view():
         )
         st.info(
             f"Vista previa del Crédito BCV:\n\n"
+            f"Cliente: {cliente_pedido['nombre'] or cliente_pedido['username']}\n\n"
             f"Total real USD: {money_usd(total_preview_usd)}\n\n"
             f"Total Bs a tasa proveedor: {money_bs(total_preview_bs)}\n\n"
             f"Tasa BCV actual: {tasa_bcv_preview:,.2f}\n\n"
@@ -4333,6 +4630,8 @@ def carrito_view():
             "credito_bcv": float(credito_bcv_preview),
             "metodo_pago": metodo_pago,
             "notas": notas_pedido,
+            "cliente_target_username": cliente_pedido["username"],
+            "cliente_nombre": cliente_pedido["nombre"] or cliente_pedido["username"],
             "cart_signature": json.dumps(carrito, sort_keys=True, ensure_ascii=False),
         }
         st.success("Crédito BCV calculado. Revisa el resumen y luego confirma el pedido.")
@@ -4346,7 +4645,8 @@ def carrito_view():
             metodo_pago,
             envio_pedido,
             notas_pedido,
-            tipo_credito="usd"
+            tipo_credito="usd",
+            cliente_target_username=cliente_pedido["username"]
         )
         if pid:
             st.success(f"{msg} Pedido #{pid}.")
@@ -4355,7 +4655,6 @@ def carrito_view():
         else:
             st.error(msg)
 
-    # Confirmación separada para Crédito BCV: nunca se crea con el primer botón.
     calc = st.session_state.get("_credito_bcv_calc")
     if calc:
         carrito_actual_sig = json.dumps(carrito, sort_keys=True, ensure_ascii=False)
@@ -4369,6 +4668,7 @@ def carrito_view():
             c2.metric("Total Bs proveedor", money_bs(calc["total_bs"]))
             c3.metric("Tasa BCV", f"{calc['tasa_bcv']:,.2f}")
             c4.metric("Crédito BCV", f"{money_usd(calc['credito_bcv'])} BCV")
+            st.caption(f"Cliente final: {calc.get('cliente_nombre','')}")
 
             st.info(
                 "Al confirmar, se creará el pedido y la cuenta por cobrar en $ BCV. "
@@ -4384,7 +4684,8 @@ def carrito_view():
                     calc["metodo_pago"],
                     calc["envio_usd"],
                     calc["notas"],
-                    tipo_credito="bcv"
+                    tipo_credito="bcv",
+                    cliente_target_username=calc.get("cliente_target_username")
                 )
                 if pid:
                     st.session_state["_credito_bcv_calc"] = None
