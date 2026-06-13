@@ -40,7 +40,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V57 Métodos de Pago y Abonos Tasa Proveedor"
+APP_NAME = "Sistema de Insumos al Mayor V58 Precio Especial Optimizado y Pago Móvil"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -1710,11 +1710,14 @@ def producto_maneja_precio_especial(prod):
 def producto_con_precio_para_usuario(prod, user=None):
     """
     Devuelve una copia dict del producto con precios efectivos.
-    Regla V56 Fix1:
+    Regla V58 optimizada:
     - Precio especial unidad = precio por unidad.
-    - Precio especial presentación intermedia = precio TOTAL de la presentación.
-    - Precio especial bulto = precio TOTAL del bulto.
-    Internamente se convierte a precio unitario para mantener los cálculos existentes.
+    - Precio especial presentación intermedia = precio por unidad dentro del pack/docena/caja.
+    - Precio especial bulto = precio por unidad dentro del bulto.
+
+    Ejemplo:
+    Si un bulto trae 50 y el total especial deseado es $11,
+    cargar precio especial bulto c/u = 11 / 50 = 0.22.
     """
     try:
         data = dict(prod)
@@ -1722,37 +1725,25 @@ def producto_con_precio_para_usuario(prod, user=None):
         data = {k: prod[k] for k in prod.keys()}
 
     data["_precio_especial_aplicado"] = False
-    data["_precio_especial_intermedia_total"] = 0.0
-    data["_precio_especial_bulto_total"] = 0.0
-
     if user is None:
         return data
 
     if usuario_es_cliente_especial(user) and producto_maneja_precio_especial(prod):
         try:
             pu = float(data.get("precio_especial_unidad") or 0)
-            pinter_total = float(data.get("precio_especial_docena") or 0)
-            pbulto_total = float(data.get("precio_especial_bulto") or 0)
-
-            inter_cant = max(1, int(data.get("presentacion_intermedia_cantidad") or 12))
-            bulto_cant = max(1, int(data.get("bulto_contiene") or 1))
-
+            pd = float(data.get("precio_especial_docena") or 0)
+            pb = float(data.get("precio_especial_bulto") or 0)
             if pu > 0:
                 data["precio_unidad"] = pu
                 data["_precio_especial_aplicado"] = True
-
-            if pinter_total > 0:
-                data["precio_docena"] = pinter_total / inter_cant
-                data["_precio_especial_intermedia_total"] = pinter_total
+            if pd > 0:
+                data["precio_docena"] = pd
                 data["_precio_especial_aplicado"] = True
-
-            if pbulto_total > 0:
-                data["precio_bulto"] = pbulto_total / bulto_cant
-                data["_precio_especial_bulto_total"] = pbulto_total
+            if pb > 0:
+                data["precio_bulto"] = pb
                 data["_precio_especial_aplicado"] = True
         except Exception:
             pass
-
     return data
 
 
@@ -2537,8 +2528,8 @@ def admin_productos():
             pe0, pe1, pe2, pe3 = st.columns(4)
             maneja_precio_especial = pe0.checkbox("Maneja precio especial", value=bool(prod["maneja_precio_especial"]) if prod and "maneja_precio_especial" in prod.keys() else False)
             precio_especial_unidad = pe1.number_input("Especial unidad USD", min_value=0.0, value=float(prod["precio_especial_unidad"] if prod and "precio_especial_unidad" in prod.keys() else 0), step=0.01, disabled=not maneja_precio_especial)
-            precio_especial_docena = pe2.number_input("Especial presentación TOTAL USD", min_value=0.0, value=float(prod["precio_especial_docena"] if prod and "precio_especial_docena" in prod.keys() else 0), step=0.01, disabled=not maneja_precio_especial)
-            precio_especial_bulto = pe3.number_input("Especial bulto TOTAL USD", min_value=0.0, value=float(prod["precio_especial_bulto"] if prod and "precio_especial_bulto" in prod.keys() else 0), step=0.01, disabled=not maneja_precio_especial)
+            precio_especial_docena = pe2.number_input("Especial presentación c/u USD", min_value=0.0, value=float(prod["precio_especial_docena"] if prod and "precio_especial_docena" in prod.keys() else 0), step=0.01, disabled=not maneja_precio_especial, help="Precio por unidad dentro de la presentación intermedia.")
+            precio_especial_bulto = pe3.number_input("Especial bulto c/u USD", min_value=0.0, value=float(prod["precio_especial_bulto"] if prod and "precio_especial_bulto" in prod.keys() else 0), step=0.01, disabled=not maneja_precio_especial, help="Precio por unidad dentro del bulto. Ej: si el bulto trae 50 y quieres total $11, coloca 0.22.")
 
             c4, c5, c6, c7 = st.columns(4)
             maneja_docena = c4.checkbox("Maneja presentación intermedia", value=bool(prod["maneja_docena"]) if prod else True)
@@ -3232,25 +3223,39 @@ def metodo_pago_detalle_texto(mp):
     partes = [f"Método: {mp['nombre']}"]
     if tipo:
         partes.append(f"Tipo: {tipo}")
-    for campo, etiqueta in [
-        ("banco", "Banco"),
-        ("titular", "Titular"),
-        ("cuenta", "Cuenta"),
-        ("cedula_rif", "Cédula/RIF"),
-        ("tipo_cuenta", "Tipo de cuenta"),
-        ("telefono", "Teléfono"),
-        ("correo", "Correo"),
-        ("apodo", "Apodo"),
-    ]:
-        try:
-            val = mp[campo]
-        except Exception:
-            val = None
-        if val:
-            partes.append(f"{etiqueta}: {val}")
+
+    if tipo == "Pago móvil":
+        for campo, etiqueta in [
+            ("banco", "Banco"),
+            ("cedula_rif", "Cédula/RIF"),
+            ("telefono", "Teléfono"),
+            ("titular", "Nombre titular"),
+        ]:
+            val = mp[campo] if campo in mp.keys() else None
+            if val:
+                partes.append(f"{etiqueta}: {val}")
+    else:
+        for campo, etiqueta in [
+            ("banco", "Banco"),
+            ("titular", "Titular"),
+            ("cuenta", "Cuenta"),
+            ("cedula_rif", "Cédula/RIF"),
+            ("tipo_cuenta", "Tipo de cuenta"),
+            ("telefono", "Teléfono"),
+            ("correo", "Correo"),
+            ("apodo", "Apodo"),
+        ]:
+            try:
+                val = mp[campo]
+            except Exception:
+                val = None
+            if val:
+                partes.append(f"{etiqueta}: {val}")
+
     if mp["notas"]:
         partes.append(f"Notas: {mp['notas']}")
     return "\n".join(partes)
+
 
 def metodos_pago_activos():
     return q("SELECT * FROM metodos_pago WHERE activo=1 ORDER BY tipo,nombre", fetch=True)
@@ -4354,21 +4359,14 @@ def render_card_producto(prod, user, cliente_precio=None):
         price_lines = []
         etiqueta = " especial" if prod.get("_precio_especial_aplicado") else ""
         if int(prod["maneja_docena"] or 0):
-            if prod.get("_precio_especial_aplicado") and float(prod.get("_precio_especial_intermedia_total") or 0) > 0:
-                total_inter_usd = float(prod.get("_precio_especial_intermedia_total") or 0)
-                price_lines.append(f"{producto_intermedia_label(prod)} especial TOTAL: <b>{money_usd(total_inter_usd)}</b> · {money_bs(total_inter_usd * tasa)} <span class='muted'>({money_usd(prod['precio_docena'])} c/u)</span>")
-            else:
-                price_lines.append(f"{producto_intermedia_label(prod)}{etiqueta}: <b>{money_usd(prod['precio_docena'])}</b> c/u · {money_bs(float(prod['precio_docena'] or 0) * tasa)} c/u")
+            price_lines.append(f"{producto_intermedia_label(prod)}{etiqueta}: <b>{money_usd(prod['precio_docena'])}</b> c/u · {money_bs(float(prod['precio_docena'] or 0) * tasa)} c/u")
         if int(prod["maneja_bulto"] or 0):
             bulto_contiene = int(prod["bulto_contiene"] or 1)
             precio_bulto_unitario = float(prod["precio_bulto"] or 0)
-            total_bulto_usd = float(prod.get("_precio_especial_bulto_total") or 0) if prod.get("_precio_especial_aplicado") and float(prod.get("_precio_especial_bulto_total") or 0) > 0 else precio_bulto_unitario * bulto_contiene
+            total_bulto_usd = precio_bulto_unitario * bulto_contiene
             total_bulto_bs = total_bulto_usd * tasa
-            if prod.get("_precio_especial_aplicado") and float(prod.get("_precio_especial_bulto_total") or 0) > 0:
-                price_lines.append(f"Bulto especial TOTAL ({bulto_contiene} {prod['unidad_base']}): <b>{money_usd(total_bulto_usd)}</b> · {money_bs(total_bulto_bs)} <span class='muted'>({money_usd(precio_bulto_unitario)} c/u)</span>")
-            else:
-                price_lines.append(f"Bulto{etiqueta}: <b>{money_usd(precio_bulto_unitario)}</b> c/u · {money_bs(precio_bulto_unitario * tasa)} c/u")
-                price_lines.append(f"<span style='color:#047857;font-weight:800'>Bulto Total ({bulto_contiene} {prod['unidad_base']}): {money_usd(total_bulto_usd)} · {money_bs(total_bulto_bs)}</span>")
+            price_lines.append(f"Bulto{etiqueta}: <b>{money_usd(precio_bulto_unitario)}</b> c/u · {money_bs(precio_bulto_unitario * tasa)} c/u")
+            price_lines.append(f"<span style='color:#047857;font-weight:800'>Bulto Total ({bulto_contiene} {prod['unidad_base']}): {money_usd(total_bulto_usd)} · {money_bs(total_bulto_bs)}</span>")
         if price_lines:
             st.markdown("<div class='muted'>" + "<br>".join(price_lines) + "</div>", unsafe_allow_html=True)
         if prod.get("_precio_especial_aplicado"):
