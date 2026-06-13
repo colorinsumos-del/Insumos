@@ -3,6 +3,7 @@ import os
 import json
 import sqlite3
 import shutil
+import zipfile
 import hashlib
 import secrets
 from pathlib import Path
@@ -40,7 +41,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V62 Tablas Accionables y Live UI"
+APP_NAME = "Sistema de Insumos al Mayor V64 Backup ZIP y Limpieza"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -1337,7 +1338,7 @@ def crear_respaldo(destino=None):
     destino.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    tablas = ["usuarios", "categorias", "productos", "cotizaciones", "pedidos", "creditos", "abonos", "configuracion"]
+    tablas = ["usuarios", "categorias", "productos", "cotizaciones", "pedidos", "creditos", "abonos", "metodos_pago", "carritos", "productos_vendedores", "configuracion"]
     data = {}
     for t in tablas:
         try:
@@ -1371,10 +1372,10 @@ def importar_respaldo_json(uploaded_file, modo="fusionar"):
 
     data = json.load(uploaded_file)
 
-    tablas = ["categorias", "usuarios", "productos", "cotizaciones", "pedidos", "creditos", "abonos", "configuracion"]
+    tablas = ["categorias", "usuarios", "productos", "cotizaciones", "pedidos", "creditos", "abonos", "metodos_pago", "carritos", "productos_vendedores", "configuracion"]
 
     if modo == "reemplazar":
-        for t in ["abonos", "creditos", "pedidos", "cotizaciones", "productos", "categorias"]:
+        for t in ["abonos", "creditos", "pedidos", "cotizaciones", "productos", "categorias", "metodos_pago", "carritos", "productos_vendedores"]:
             try:
                 q(f"DELETE FROM {t}")
             except Exception:
@@ -1406,6 +1407,10 @@ def importar_respaldo_json(uploaded_file, modo="fusionar"):
                     sql = f"INSERT INTO {tabla} ({col_sql}) VALUES ({placeholders}) ON CONFLICT(nombre) DO UPDATE SET {update_sql}"
                 elif tabla == "configuracion" and "clave" in row:
                     sql = f"INSERT INTO {tabla} ({col_sql}) VALUES ({placeholders}) ON CONFLICT(clave) DO UPDATE SET {update_sql}"
+                elif tabla == "carritos" and "username" in row:
+                    sql = f"INSERT INTO {tabla} ({col_sql}) VALUES ({placeholders}) ON CONFLICT(username) DO UPDATE SET {update_sql}"
+                elif tabla == "productos_vendedores" and "sku" in row and "vendedor_username" in row:
+                    sql = f"INSERT INTO {tabla} ({col_sql}) VALUES ({placeholders}) ON CONFLICT(sku,vendedor_username) DO UPDATE SET {update_sql}"
                 elif "id" in row:
                     sql = f"INSERT OR REPLACE INTO {tabla} ({col_sql}) VALUES ({placeholders})"
                 else:
@@ -1424,6 +1429,130 @@ def exportar_json_actual():
     with open(json_path, "rb") as f:
         content = f.read()
     return content, Path(json_path).name
+
+def crear_respaldo_zip(destino=None, incluir_pagos=True, incluir_pdfs=True):
+    """
+    Crea un ZIP completo con JSON + DB + archivos físicos opcionales.
+    Ideal para migrar o proteger comprobantes subidos por web.
+    """
+    destino = Path(destino or get_config("backup_folder", str(BACKUP_DIR)))
+    destino.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    json_path, db_path = crear_respaldo(destino)
+    zip_path = destino / f"backup_insumos_mayor_completo_{stamp}.zip"
+
+    readme_txt = f"""RESPALDO COMPLETO - SISTEMA INSUMOS MAYOR
+
+Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+Incluye:
+- backup.json: datos principales del sistema.
+- backup.db: copia completa de la base de datos SQLite.
+- static/pagos: comprobantes físicos subidos por clientes/admin, si se incluyeron.
+- static/cotizaciones: PDFs generados, si se incluyeron.
+
+Nota:
+El JSON guarda la referencia del comprobante, pero el archivo físico vive en static/pagos.
+Por eso este ZIP es el respaldo más completo cuando usas carga web de comprobantes.
+"""
+
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+        if json_path and Path(json_path).exists():
+            z.write(json_path, arcname="backup.json")
+        if db_path and Path(db_path).exists():
+            z.write(db_path, arcname="backup.db")
+
+        z.writestr("README_RESPALDO.txt", readme_txt)
+
+        if incluir_pagos and PAGOS_DIR.exists():
+            for f in PAGOS_DIR.rglob("*"):
+                if f.is_file():
+                    z.write(f, arcname=str(Path("static") / "pagos" / f.relative_to(PAGOS_DIR)))
+
+        if incluir_pdfs and PDF_DIR.exists():
+            for f in PDF_DIR.rglob("*"):
+                if f.is_file():
+                    z.write(f, arcname=str(Path("static") / "cotizaciones" / f.relative_to(PDF_DIR)))
+
+    return str(zip_path)
+
+def exportar_zip_actual(incluir_pagos=True, incluir_pdfs=True):
+    destino = BACKUP_DIR
+    zip_path = crear_respaldo_zip(destino, incluir_pagos=incluir_pagos, incluir_pdfs=incluir_pdfs)
+    with open(zip_path, "rb") as f:
+        content = f.read()
+    return content, Path(zip_path).name
+
+def archivo_size_mb(path):
+    try:
+        return round(Path(path).stat().st_size / (1024 * 1024), 3)
+    except Exception:
+        return 0.0
+
+def comprobantes_referenciados():
+    refs = set()
+    try:
+        rows = q("SELECT comprobante_path FROM abonos WHERE comprobante_path IS NOT NULL AND comprobante_path<>''", fetch=True)
+    except Exception:
+        rows = []
+    for r in rows:
+        try:
+            p = Path(r["comprobante_path"])
+            refs.add(str(p.resolve()))
+            refs.add(str(p))
+        except Exception:
+            pass
+    return refs
+
+def listar_archivos_limpieza_pagos(dias=60, solo_no_referenciados=True):
+    dias = int(dias or 60)
+    limite = datetime.now() - timedelta(days=dias)
+    refs = comprobantes_referenciados()
+    data = []
+    total_mb = 0.0
+
+    if not PAGOS_DIR.exists():
+        return data, total_mb
+
+    for f in PAGOS_DIR.rglob("*"):
+        if not f.is_file():
+            continue
+        try:
+            mtime = datetime.fromtimestamp(f.stat().st_mtime)
+            if mtime > limite:
+                continue
+            ref_abs = str(f.resolve())
+            ref_rel = str(f)
+            referenciado = ref_abs in refs or ref_rel in refs
+            if solo_no_referenciados and referenciado:
+                continue
+            size_mb = archivo_size_mb(f)
+            total_mb += size_mb
+            data.append({
+                "archivo": str(f),
+                "nombre": f.name,
+                "modificado": mtime.strftime("%Y-%m-%d %H:%M:%S"),
+                "mb": size_mb,
+                "referenciado_en_abonos": referenciado
+            })
+        except Exception:
+            pass
+
+    return data, round(total_mb, 3)
+
+def borrar_archivos_limpieza_pagos(dias=60, solo_no_referenciados=True):
+    archivos, total_mb = listar_archivos_limpieza_pagos(dias=dias, solo_no_referenciados=solo_no_referenciados)
+    borrados = 0
+    errores = []
+    for row in archivos:
+        try:
+            Path(row["archivo"]).unlink(missing_ok=True)
+            borrados += 1
+        except Exception as e:
+            errores.append(f"{row['archivo']}: {e}")
+    return borrados, total_mb, errores
+
 
 def backup_auto_si_corresponde():
     if get_config("backup_auto_diario", "1") != "1":
@@ -3307,6 +3436,18 @@ def render_metodo_pago_card(mp):
     st.markdown("#### Datos de pago")
     st.code(metodo_pago_detalle_texto(mp), language="text")
 
+def render_instruccion_comprobante(mp):
+    if not mp:
+        return
+    tipo = str(mp["tipo"] or "")
+    if tipo in ["Pago móvil", "Cuenta bancaria Venezuela"]:
+        st.caption("Para Pago Móvil / transferencia: coloca la referencia. Si el cliente desea enviar captura, puede mandarla por WhatsApp al 04126901346 y esperar validación del admin.")
+    elif tipo in ["Zelle", "Binance", "Banesco Panamá"]:
+        st.caption("Para Zelle, Binance o Banesco Panamá es recomendable cargar la captura/comprobante en la web para respaldar mejor la validación.")
+    else:
+        st.caption("Coloca la referencia o nota del pago para que el admin pueda validarlo.")
+
+
 def admin_metodos_pago():
     st.title("🏦 Métodos de pago")
     st.caption("Carga aquí los datos bancarios y métodos que verán los clientes al notificar pagos o abonos.")
@@ -3508,6 +3649,7 @@ def mis_creditos():
         mp = metodo_opts[metodo_sel]
         if mp:
             render_metodo_pago_card(mp)
+            render_instruccion_comprobante(mp)
 
         if tipo == "bcv":
             saldo_bcv = float(cr["saldo_bcv"] or cr["saldo_usd"] or 0)
@@ -4104,7 +4246,7 @@ def respaldo():
     st.title("💾 Respaldo")
     st.info("Para respaldar en Google Drive, usa una carpeta local sincronizada con Google Drive para escritorio. Ejemplo: C:\\Users\\Rene\\Google Drive\\Backups\\InsumosMayor")
 
-    tab1, tab2, tab3 = st.tabs(["Configuración", "Exportar manual", "Importar respaldo"])
+    tab1, tab2, tab_zip, tab_clean, tab3 = st.tabs(["Configuración", "Exportar JSON / DB", "Backup ZIP completo", "Limpieza", "Importar respaldo"])
 
     with tab1:
         folder = st.text_input("Carpeta destino de respaldo automático/manual", value=get_config("backup_folder", str(BACKUP_DIR)))
@@ -4116,12 +4258,13 @@ def respaldo():
         st.caption(f"Último respaldo automático: {get_config('backup_ultima_fecha','Nunca')}")
 
     with tab2:
-        st.subheader("Exportar manual")
-        st.write("Genera un respaldo completo en JSON y una copia de la base de datos `.db`.")
+        st.subheader("Exportar JSON / DB")
+        st.write("Genera un respaldo JSON y una copia de la base de datos `.db`.")
+        st.caption("El JSON incluye usuarios, categorías, productos, cotizaciones, pedidos, créditos, abonos, métodos de pago, carritos, asignaciones de vendedores y configuración.")
         folder_manual = st.text_input("Carpeta destino", value=get_config("backup_folder", str(BACKUP_DIR)), key="folder_manual_backup")
         c1, c2 = st.columns(2)
 
-        if c1.button("📦 Crear respaldo en carpeta", type="primary", use_container_width=True):
+        if c1.button("📦 Crear respaldo JSON + DB en carpeta", type="primary", use_container_width=True):
             try:
                 json_path, db_path = crear_respaldo(folder_manual)
                 st.success("Respaldo creado.")
@@ -4138,9 +4281,55 @@ def respaldo():
             except Exception as e:
                 st.error(f"No se pudo exportar: {e}")
 
+    with tab_zip:
+        st.subheader("Backup ZIP completo")
+        st.write("Este respaldo es el más completo cuando aceptas comprobantes por la web.")
+        st.caption("Incluye JSON, DB y opcionalmente archivos físicos como comprobantes en static/pagos y PDFs generados.")
+        folder_zip = st.text_input("Carpeta destino ZIP", value=get_config("backup_folder", str(BACKUP_DIR)), key="folder_zip_backup")
+        incluir_pagos = st.checkbox("Incluir comprobantes / pagos físicos", value=True, key="zip_incluir_pagos")
+        incluir_pdfs = st.checkbox("Incluir PDFs de cotizaciones/pedidos generados", value=True, key="zip_incluir_pdfs")
+
+        cz1, cz2 = st.columns(2)
+        if cz1.button("🗜️ Crear ZIP completo en carpeta", type="primary", use_container_width=True):
+            try:
+                zip_path = crear_respaldo_zip(folder_zip, incluir_pagos=incluir_pagos, incluir_pdfs=incluir_pdfs)
+                st.success("ZIP completo creado.")
+                st.write(zip_path)
+            except Exception as e:
+                st.error(f"No se pudo crear ZIP: {e}")
+
+        if cz2.button("⬇️ Preparar ZIP para descargar", use_container_width=True):
+            try:
+                content, filename = exportar_zip_actual(incluir_pagos=incluir_pagos, incluir_pdfs=incluir_pdfs)
+                st.download_button("Descargar ZIP completo", data=content, file_name=filename, mime="application/zip", use_container_width=True)
+            except Exception as e:
+                st.error(f"No se pudo preparar ZIP: {e}")
+
+    with tab_clean:
+        st.subheader("Limpieza de comprobantes viejos")
+        st.warning("Esta limpieza solo borra archivos físicos en la carpeta static/pagos. No borra abonos ni créditos de la base de datos.")
+        dias = st.number_input("Buscar archivos con más de X días", min_value=1, max_value=3650, value=90, step=1)
+        solo_no_ref = st.checkbox("Borrar solo archivos no referenciados en abonos", value=True, help="Recomendado. Evita borrar comprobantes que todavía estén asociados a pagos.")
+        archivos, total_mb = listar_archivos_limpieza_pagos(dias=dias, solo_no_referenciados=solo_no_ref)
+        st.metric("Archivos candidatos", len(archivos))
+        st.metric("Espacio estimado", f"{total_mb} MB")
+        if archivos:
+            st.dataframe(pd.DataFrame(archivos), use_container_width=True, hide_index=True)
+        else:
+            st.success("No hay archivos candidatos para limpieza con esos filtros.")
+
+        confirmar_limpieza = st.checkbox("Confirmo que deseo borrar estos archivos físicos", key="confirmar_limpieza_pagos")
+        if st.button("🧹 Borrar archivos candidatos", disabled=not confirmar_limpieza or not archivos, use_container_width=True):
+            borrados, mb, errores = borrar_archivos_limpieza_pagos(dias=dias, solo_no_referenciados=solo_no_ref)
+            st.success(f"Archivos borrados: {borrados}. Espacio estimado liberado: {mb} MB.")
+            if errores:
+                st.warning("Algunos archivos no se pudieron borrar:")
+                st.code("\\n".join(errores[:20]))
+            st.rerun()
+
     with tab3:
         st.subheader("Importar respaldo")
-        st.warning("Antes de importar, crea un respaldo actual. La importación puede modificar productos, categorías, usuarios, pedidos, créditos y abonos.")
+        st.warning("Antes de importar, crea un respaldo actual. La importación puede modificar productos, categorías, usuarios, pedidos, créditos, abonos, métodos de pago, carritos y asignaciones de vendedores.")
         uploaded = st.file_uploader("Seleccionar respaldo .json", type=["json"])
         modo = st.radio(
             "Modo de importación",
