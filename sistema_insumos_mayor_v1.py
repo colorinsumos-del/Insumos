@@ -40,7 +40,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V53 Precio Especial Simple"
+APP_NAME = "Sistema de Insumos al Mayor V54 Stock Inteligente y Precio Especial Fix"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -1106,13 +1106,18 @@ def sync_producto_wc(sku: str):
       (p.get("id"), p.get("name") or "", stock, p.get("stock_status") or "", first_image_url(p), p.get("permalink") or "", now(), now(), sku))
     return True, f"Sincronizado: stock {stock}"
 
-def sync_todos_productos():
+def sync_todos_productos(progress_bar=None, status_box=None):
     rows = q("SELECT sku FROM productos WHERE activo=1", fetch=True)
+    total = len(rows)
     ok = 0
     no = 0
     errors = []
-    for r in rows:
+    for i, r in enumerate(rows, start=1):
         try:
+            if status_box is not None:
+                status_box.info(f"Sincronizando stock WooCommerce {i}/{total}: {r['sku']}")
+            if progress_bar is not None and total:
+                progress_bar.progress(min(i / total, 1.0))
             success, msg = sync_producto_wc(r["sku"])
             if success:
                 ok += 1
@@ -1756,18 +1761,26 @@ def credito_bs_hoy(cr):
         return float(cr["saldo_bcv"] or 0) * get_tasa_bcv()
     return float(cr["saldo_usd"] or 0) * get_tasa_proveedor()
 
-def auto_sync_stock_si_corresponde():
-    """Sincroniza stock automáticamente con WooCommerce al entrar, respetando intervalo mínimo."""
+def auto_sync_stock_si_corresponde(user=None):
+    """Sincroniza stock automáticamente solo para admin y respetando intervalo mínimo."""
     if not wc_ready():
         return
     try:
-        minutos = int(parse_float(get_config("stock_auto_sync_minutos", "60"), 60))
+        minutos = int(parse_float(get_config("stock_auto_sync_minutos", "180"), 180))
     except Exception:
-        minutos = 60
+        minutos = 180
     if minutos <= 0:
         return
+
     clave = "stock_auto_sync_ultima"
     ultima = get_config(clave, "")
+
+    # Los clientes/vendedores no quedan bloqueados por sincronización al entrar.
+    if user is not None and user["rol"] != "admin":
+        if ultima:
+            st.session_state["_auto_stock_sync_msg"] = f"Stock local usado. Última actualización: {ultima}."
+        return
+
     debe = True
     try:
         if ultima:
@@ -1775,17 +1788,23 @@ def auto_sync_stock_si_corresponde():
             debe = (datetime.now() - dt).total_seconds() >= minutos * 60
     except Exception:
         debe = True
-    # Solo una vez por sesión para no poner lenta la app con cada rerun.
+
     if st.session_state.get("_auto_stock_sync_done") == ultima and ultima:
         debe = False
+
     if debe:
         try:
-            ok, no, errors = sync_todos_productos()
+            with st.spinner("Actualizando stock con WooCommerce... puedes esperar unos segundos."):
+                ok, no, errors = sync_todos_productos()
             set_config(clave, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
             st.session_state["_auto_stock_sync_done"] = get_config(clave, "")
             st.session_state["_auto_stock_sync_msg"] = f"Stock actualizado automáticamente: {ok} sincronizados."
         except Exception as e:
             st.session_state["_auto_stock_sync_msg"] = f"No se pudo actualizar stock automáticamente: {e}"
+    else:
+        if ultima:
+            st.session_state["_auto_stock_sync_msg"] = f"Stock actualizado: {ultima}."
+
 
 def get_producto_row(sku):
     rows = q("SELECT * FROM productos WHERE sku=?", (sku,), fetch=True)
@@ -4015,8 +4034,45 @@ def dialog_imagen(nombre, sku, url):
     else:
         st.info("Este producto no tiene imagen sincronizada.")
 
-def render_card_producto(prod, user):
-    prod = producto_con_precio_para_usuario(prod, user)
+def cliente_activo_para_venta(user):
+    """
+    Cliente comercial usado para mostrar precios y recalcular carrito.
+    En admin permite preparar carrito para un cliente específico.
+    """
+    if user["rol"] == "admin":
+        uname = st.session_state.get("cliente_venta_activo_username")
+        if uname:
+            u = get_user(uname)
+            if u:
+                return u
+    return user
+
+def selector_cliente_venta_admin(user, key="cliente_venta_selector"):
+    if user["rol"] != "admin":
+        return user
+    usuarios_cliente = q("SELECT username,nombre FROM usuarios WHERE activo=1 ORDER BY nombre,username", fetch=True)
+    if not usuarios_cliente:
+        return user
+    opts = ["Usar mi usuario admin"] + [f"{u['nombre'] or u['username']} — {u['username']}" for u in usuarios_cliente]
+    mapa = {f"{u['nombre'] or u['username']} — {u['username']}": u["username"] for u in usuarios_cliente}
+    actual = st.session_state.get("cliente_venta_activo_username")
+    index = 0
+    if actual:
+        for i, label in enumerate(opts):
+            if mapa.get(label) == actual:
+                index = i
+                break
+    sel = st.selectbox("Ver/preparar pedido para cliente", opts, index=index, key=key)
+    if sel == "Usar mi usuario admin":
+        st.session_state["cliente_venta_activo_username"] = None
+        return user
+    st.session_state["cliente_venta_activo_username"] = mapa[sel]
+    return get_user(mapa[sel]) or user
+
+
+def render_card_producto(prod, user, cliente_precio=None):
+    cliente_precio = cliente_precio or user
+    prod = producto_con_precio_para_usuario(prod, cliente_precio)
     tasa = get_tasa_proveedor()
     stock = int(prod["wc_stock"] or 0)
     disp = disponibilidad(prod)
@@ -4058,21 +4114,25 @@ def render_card_producto(prod, user):
             st.markdown('<span class="badge badge-ok">⭐ Precio especial aplicado</span>', unsafe_allow_html=True)
 
         st.markdown('<div class="catalog-list-prices">', unsafe_allow_html=True)
-        st.markdown(f"<div class='price-main'>Unidad: {money_usd(prod['precio_unidad'])}</div>", unsafe_allow_html=True)
+        titulo_precio = "⭐ Precio especial unidad" if prod.get("_precio_especial_aplicado") else "Unidad"
+        st.markdown(f"<div class='price-main'>{titulo_precio}: {money_usd(prod['precio_unidad'])}</div>", unsafe_allow_html=True)
         st.markdown(f"<div class='price-bs'>{money_bs(float(prod['precio_unidad'] or 0) * tasa)}</div>", unsafe_allow_html=True)
 
         price_lines = []
+        etiqueta = " especial" if prod.get("_precio_especial_aplicado") else ""
         if int(prod["maneja_docena"] or 0):
-            price_lines.append(f"{producto_intermedia_label(prod)}: <b>{money_usd(prod['precio_docena'])}</b> c/u · {money_bs(float(prod['precio_docena'] or 0) * tasa)} c/u")
+            price_lines.append(f"{producto_intermedia_label(prod)}{etiqueta}: <b>{money_usd(prod['precio_docena'])}</b> c/u · {money_bs(float(prod['precio_docena'] or 0) * tasa)} c/u")
         if int(prod["maneja_bulto"] or 0):
             bulto_contiene = int(prod["bulto_contiene"] or 1)
             precio_bulto_unitario = float(prod["precio_bulto"] or 0)
             total_bulto_usd = precio_bulto_unitario * bulto_contiene
             total_bulto_bs = total_bulto_usd * tasa
-            price_lines.append(f"Bulto: <b>{money_usd(precio_bulto_unitario)}</b> c/u · {money_bs(precio_bulto_unitario * tasa)} c/u")
+            price_lines.append(f"Bulto{etiqueta}: <b>{money_usd(precio_bulto_unitario)}</b> c/u · {money_bs(precio_bulto_unitario * tasa)} c/u")
             price_lines.append(f"<span style='color:#047857;font-weight:800'>Bulto Total ({bulto_contiene} {prod['unidad_base']}): {money_usd(total_bulto_usd)} · {money_bs(total_bulto_bs)}</span>")
         if price_lines:
             st.markdown("<div class='muted'>" + "<br>".join(price_lines) + "</div>", unsafe_allow_html=True)
+        if prod.get("_precio_especial_aplicado"):
+            st.caption("Se muestran solo los precios especiales aplicados para este cliente.")
         st.markdown("</div>", unsafe_allow_html=True)
 
         if user["rol"] in ["admin", "vendedor_mercadolibre"]:
@@ -4163,7 +4223,7 @@ def render_card_producto(prod, user):
                 "peso_total_kg": float(prod["peso_unidad_kg"] or 0) * int(unidades_base_total),
                 "imagen_url": prod["wc_imagen_url"],
             }
-            carrito[key] = recalcular_item_carrito(item_tmp, cantidad_final, user=user)
+            carrito[key] = recalcular_item_carrito(item_tmp, cantidad_final, user=cliente_precio)
             guardar_carrito(user["username"], carrito)
             n_items, n_unidades, total_carrito = carrito_resumen_texto(user["username"])
             cantidad_presentacion_agregada = int(cantidad)
@@ -4191,9 +4251,13 @@ def tienda():
     st.caption("Vista en lista horizontal: imagen, información y acciones por producto.")
     show_last_cart_action()
     user = get_user(st.session_state.user["username"])
+    cliente_precio = selector_cliente_venta_admin(user, key="cliente_venta_tienda")
+    if user["rol"] == "admin" and cliente_precio["username"] != user["username"]:
+        st.success(f"Mostrando precios y preparando carrito para: {cliente_precio['nombre'] or cliente_precio['username']}")
     tasa = get_tasa_proveedor()
     carrito = cargar_carrito(user["username"])
-    t = calcular_carrito(carrito)
+    carrito_preview = {k: recalcular_item_carrito(v, user=cliente_precio) for k, v in carrito.items()}
+    t = calcular_carrito(carrito_preview)
 
     cats = categorias_activas()
     cat_names = ["Todas"] + [c["nombre"] for c in cats]
@@ -4359,6 +4423,9 @@ def recalcular_pedido_y_credito(pedido_id, items, envio_usd, metodo_pago=None, n
 def carrito_view():
     st.title("🛒 Carrito")
     user = get_user(st.session_state.user["username"])
+    cliente_precio_carrito = cliente_activo_para_venta(user)
+    if user["rol"] == "admin" and cliente_precio_carrito["username"] != user["username"]:
+        st.success(f"Carrito calculado para cliente: {cliente_precio_carrito['nombre'] or cliente_precio_carrito['username']}")
     carrito = cargar_carrito(user["username"])
     tasa = get_tasa_proveedor()
 
@@ -4370,7 +4437,7 @@ def carrito_view():
 
     for key, item in list(carrito.items()):
         # Recalcula silenciosamente para mantener precios actuales y corregir visual.
-        item = recalcular_item_carrito(item, user=user)
+        item = recalcular_item_carrito(item, user=cliente_precio_carrito)
         carrito[key] = item
         guardar_carrito(user["username"], carrito)
 
@@ -4449,16 +4516,26 @@ def carrito_view():
     st.markdown("### Procesar pedido")
 
     # Admin puede armar el carrito desde su usuario y asignar el pedido a un cliente final.
-    cliente_pedido = user
+    cliente_pedido = cliente_precio_carrito
     if user["rol"] == "admin":
         usuarios_cliente = q("SELECT username,nombre,telefono,rif FROM usuarios WHERE activo=1 ORDER BY nombre,username", fetch=True)
         opts_cliente = ["Usar mi usuario admin"] + [f"{u['nombre'] or u['username']} — {u['username']}" for u in usuarios_cliente]
         mapa_cliente = {f"{u['nombre'] or u['username']} — {u['username']}": u["username"] for u in usuarios_cliente}
-        sel_cliente = st.selectbox("Pedido para cliente", opts_cliente, key="pedido_para_cliente_admin")
+        actual_cliente = st.session_state.get("cliente_venta_activo_username")
+        idx_cliente = 0
+        if actual_cliente:
+            for i, label in enumerate(opts_cliente):
+                if mapa_cliente.get(label) == actual_cliente:
+                    idx_cliente = i
+                    break
+        sel_cliente = st.selectbox("Pedido para cliente", opts_cliente, index=idx_cliente, key="pedido_para_cliente_admin")
         if sel_cliente != "Usar mi usuario admin":
+            st.session_state["cliente_venta_activo_username"] = mapa_cliente[sel_cliente]
             cliente_pedido = get_user(mapa_cliente[sel_cliente]) or user
             st.success(f"El pedido se creará a nombre de: {cliente_pedido['nombre'] or cliente_pedido['username']}")
         else:
+            st.session_state["cliente_venta_activo_username"] = None
+            cliente_pedido = user
             st.caption("El pedido se creará a nombre del usuario admin actual.")
     else:
         st.caption(f"El pedido se creará a nombre de: {user['nombre'] or user['username']}")
@@ -4773,7 +4850,7 @@ if user is None:
     st.stop()
 
 show_feedback()
-auto_sync_stock_si_corresponde()
+auto_sync_stock_si_corresponde(user)
 if st.session_state.get("_auto_stock_sync_msg"):
     st.sidebar.caption(st.session_state.get("_auto_stock_sync_msg"))
 
@@ -4781,6 +4858,23 @@ with st.sidebar:
     st.title("📦 Insumos Mayor")
     st.write(f"**{user['nombre']}**")
     st.caption(f"{user['rol']} · {user['username']}")
+    ultima_stock_sidebar = get_config("stock_auto_sync_ultima", "")
+    if ultima_stock_sidebar:
+        st.caption(f"📦 Stock actualizado: {ultima_stock_sidebar}")
+    else:
+        st.caption("📦 Stock todavía no sincronizado.")
+    if user["rol"] == "admin":
+        if st.button("🔄 Actualizar stock ahora", use_container_width=True):
+            barra = st.progress(0)
+            estado_sync = st.empty()
+            try:
+                ok, no, errors = sync_todos_productos(progress_bar=barra, status_box=estado_sync)
+                set_config("stock_auto_sync_ultima", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                estado_sync.success(f"Stock actualizado: {ok} sincronizados, {no} sin actualizar.")
+                if errors:
+                    st.warning("\n".join(errors[:5]))
+            except Exception as e:
+                estado_sync.error(f"No se pudo actualizar stock: {e}")
     st.markdown("---")
 
     opciones = ["Tienda", "Carrito", "Mis pedidos", "Mis créditos", "Mi perfil"]
