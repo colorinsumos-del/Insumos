@@ -40,7 +40,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V56 Precio Especial por Presentación"
+APP_NAME = "Sistema de Insumos al Mayor V56 Fix1 Precio Especial por Presentación"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -1688,11 +1688,11 @@ def producto_maneja_precio_especial(prod):
 def producto_con_precio_para_usuario(prod, user=None):
     """
     Devuelve una copia dict del producto con precios efectivos.
-    Regla V56:
+    Regla V56 Fix1:
     - Precio especial unidad = precio por unidad.
     - Precio especial presentación intermedia = precio TOTAL de la presentación.
     - Precio especial bulto = precio TOTAL del bulto.
-    Internamente se convierte a precio unitario para no romper cálculos existentes.
+    Internamente se convierte a precio unitario para mantener los cálculos existentes.
     """
     try:
         data = dict(prod)
@@ -1702,6 +1702,7 @@ def producto_con_precio_para_usuario(prod, user=None):
     data["_precio_especial_aplicado"] = False
     data["_precio_especial_intermedia_total"] = 0.0
     data["_precio_especial_bulto_total"] = 0.0
+
     if user is None:
         return data
 
@@ -1718,21 +1719,2343 @@ def producto_con_precio_para_usuario(prod, user=None):
                 data["precio_unidad"] = pu
                 data["_precio_especial_aplicado"] = True
 
-            # En precio especial, el campo intermedio representa el TOTAL del pack/docena/caja.
             if pinter_total > 0:
                 data["precio_docena"] = pinter_total / inter_cant
                 data["_precio_especial_intermedia_total"] = pinter_total
                 data["_precio_especial_aplicado"] = True
 
-            # En precio especial, el campo bulto representa el TOTAL del bulto.
             if pbulto_total > 0:
                 data["precio_bulto"] = pbulto_total / bulto_cant
                 data["_precio_especial_bulto_total"] = pbulto_total
                 data["_precio_especial_aplicado"] = True
         except Exception:
             pass
+
     return data
 
+
+def producto_intermedia_nombre(prod):
+    """Nombre comercial de la presentación intermedia: Docena, Pack, Caja, Paquete."""
+    try:
+        nombre = prod["presentacion_intermedia_nombre"]
+    except Exception:
+        nombre = None
+    nombre = str(nombre or "Docena").strip()
+    return nombre if nombre else "Docena"
+
+def producto_intermedia_cantidad(prod):
+    """Cantidad de unidades base de la presentación intermedia."""
+    try:
+        val = int(prod["presentacion_intermedia_cantidad"] or 12)
+    except Exception:
+        val = 12
+    return max(1, val)
+
+def producto_intermedia_label(prod):
+    return f"{producto_intermedia_nombre(prod)} x{producto_intermedia_cantidad(prod)}"
+
+def presentacion_display_item(item):
+    p = str(item.get("presentacion", "unidad"))
+    if p == "docena":
+        return item.get("presentacion_nombre") or item.get("presentacion_label") or "Docena"
+    if p == "bulto":
+        return "Bulto"
+    return "Unidad"
+
+def money_credito(cr, campo="saldo"):
+    tipo = str(cr["tipo_credito"] if "tipo_credito" in cr.keys() and cr["tipo_credito"] else "usd").lower()
+    if tipo == "bcv":
+        valor = float(cr["saldo_bcv"] if campo == "saldo" else cr["monto_bcv"] or 0)
+        return f"{money_usd(valor)} BCV"
+    valor = float(cr["saldo_usd"] if campo == "saldo" else cr["monto_usd"] or 0)
+    return money_usd(valor)
+
+def credito_bs_hoy(cr):
+    tipo = str(cr["tipo_credito"] if "tipo_credito" in cr.keys() and cr["tipo_credito"] else "usd").lower()
+    if tipo == "bcv":
+        return float(cr["saldo_bcv"] or 0) * get_tasa_bcv()
+    return float(cr["saldo_usd"] or 0) * get_tasa_proveedor()
+
+def auto_sync_stock_si_corresponde(user=None):
+    """Sincroniza stock automáticamente solo para admin y respetando intervalo mínimo."""
+    if not wc_ready():
+        return
+    try:
+        minutos = int(parse_float(get_config("stock_auto_sync_minutos", "180"), 180))
+    except Exception:
+        minutos = 180
+    if minutos <= 0:
+        return
+
+    clave = "stock_auto_sync_ultima"
+    ultima = get_config(clave, "")
+
+    # Los clientes/vendedores no quedan bloqueados por sincronización al entrar.
+    if user is not None and user["rol"] != "admin":
+        if ultima:
+            st.session_state["_auto_stock_sync_msg"] = f"Stock local usado. Última actualización: {ultima}."
+        return
+
+    debe = True
+    try:
+        if ultima:
+            dt = datetime.strptime(ultima, "%Y-%m-%d %H:%M:%S")
+            debe = (datetime.now() - dt).total_seconds() >= minutos * 60
+    except Exception:
+        debe = True
+
+    if st.session_state.get("_auto_stock_sync_done") == ultima and ultima:
+        debe = False
+
+    if debe:
+        try:
+            with st.spinner("Actualizando stock con WooCommerce... puedes esperar unos segundos."):
+                ok, no, errors = sync_todos_productos()
+            set_config(clave, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            st.session_state["_auto_stock_sync_done"] = get_config(clave, "")
+            st.session_state["_auto_stock_sync_msg"] = f"Stock actualizado automáticamente: {ok} sincronizados."
+        except Exception as e:
+            st.session_state["_auto_stock_sync_msg"] = f"No se pudo actualizar stock automáticamente: {e}"
+    else:
+        if ultima:
+            st.session_state["_auto_stock_sync_msg"] = f"Stock actualizado: {ultima}."
+
+
+def get_producto_row(sku):
+    rows = q("SELECT * FROM productos WHERE sku=?", (sku,), fetch=True)
+    return rows[0] if rows else None
+
+def recalcular_item_carrito(item, nueva_cantidad=None, user=None):
+    """
+    Recalcula un item del carrito usando precios actuales del producto.
+    Si se pasa user y el user es cliente especial, aplica precio especial del producto.
+    Si no se pasa user, intenta usar el cliente de precio guardado en el item.
+    """
+    sku = item.get("sku")
+    prod = get_producto_row(sku)
+    if not prod:
+        return item
+
+    if user is None and item.get("cliente_precio_username"):
+        user = get_user(item.get("cliente_precio_username"))
+
+    prod_precio = producto_con_precio_para_usuario(prod, user)
+
+    cantidad = int(nueva_cantidad if nueva_cantidad is not None else item.get("cantidad_presentacion", 1))
+    cantidad = max(1, cantidad)
+    presentacion = item.get("presentacion", "unidad")
+
+    precio_calc = calcular_precio_inteligente(prod_precio, presentacion, cantidad)
+    item["cantidad_presentacion"] = cantidad
+    item["equivalencia"] = int(precio_calc["equivalencia"])
+    item["unidades_base_total"] = int(precio_calc["unidades_base_total"])
+    item["precio_presentacion"] = float(precio_calc["precio_presentacion"])
+    item["precio_total"] = float(precio_calc["precio_total"])
+    item["escala_aplicada"] = precio_calc["escala_aplicada"]
+    item["detalle_precio"] = precio_calc.get("detalle_precio", precio_calc["escala_aplicada"])
+    item["presentacion_nombre"] = precio_calc.get("presentacion_nombre", producto_intermedia_nombre(prod_precio) if presentacion == "docena" else presentacion.title())
+    item["presentacion_label"] = precio_calc.get("presentacion_label", producto_intermedia_label(prod_precio) if presentacion == "docena" else presentacion.title())
+    item["peso_total_kg"] = float(prod["peso_unidad_kg"] or 0) * int(precio_calc["unidades_base_total"])
+    item["imagen_url"] = prod["wc_imagen_url"]
+    item["desc"] = prod["descripcion"]
+    item["precio_especial_aplicado"] = bool(prod_precio.get("_precio_especial_aplicado", False))
+    if user is not None:
+        item["cliente_precio_username"] = user["username"]
+        item["cliente_precio_nombre"] = user["nombre"] or user["username"]
+    if item["precio_especial_aplicado"]:
+        item["detalle_precio"] = f"{item['detalle_precio']} · precio especial"
+    return item
+
+
+def texto_linea_carrito(item):
+    presentacion = item.get("presentacion", "unidad")
+    cantidad = int(item.get("cantidad_presentacion", 1))
+    unidades = int(item.get("unidades_base_total", cantidad))
+    escala = item.get("escala_aplicada", presentacion)
+    precio_total = float(item.get("precio_total", 0) or 0)
+    nombre = presentacion_display_item(item)
+
+    extra = " · ⭐ precio especial" if item.get("precio_especial_aplicado") else ""
+    if presentacion == "unidad":
+        return f"{unidades} unidad(es) · Precio aplicado: {escala}{extra}"
+
+    if cantidad == 1:
+        return f"1 {nombre} = {unidades} unidad(es) · Total {nombre}: {money_usd(precio_total)}{extra}"
+
+    precio_pres = precio_total / cantidad if cantidad else 0
+    return f"{cantidad} {nombre}(s) = {unidades} unidad(es) · {money_usd(precio_pres)} c/{nombre}"
+
+
+def resumen_presentacion_catalogo(prod, presentacion, cantidad):
+    """Devuelve texto de ayuda para la card antes de agregar al carrito."""
+    calc = calcular_precio_inteligente(prod, presentacion, cantidad)
+    unidades = int(calc["unidades_base_total"])
+    total = float(calc["precio_total"])
+    if presentacion == "unidad":
+        return f"{unidades} unidad(es) · Precio aplicado: {calc['escala_aplicada']} · Total: {money_usd(total)}"
+    if cantidad == 1:
+        return f"1 {presentacion} = {unidades} unidad(es) · Total {presentacion}: {money_usd(total)}"
+    return f"{cantidad} {presentacion}(s) = {unidades} unidad(es) · Total: {money_usd(total)}"
+
+
+def formato_cantidad_pdf(item):
+    import re
+    """
+    Devuelve (cant, pres) para PDF sin contaminar SKU:
+    - 1 a 11 unidades => cant = número, pres = und
+    - 12 exactas por escala docena => DOC
+    - 24 exactas => DOC x2
+    - bulto exacto => BULTO / BULTO x2
+    - cantidades mixtas como 15 unidades quedan como 15, porque no son docena cerrada.
+    """
+    presentacion = str(item.get("presentacion", "unidad")).lower()
+    escala = str(item.get("escala_aplicada", "")).lower()
+    unidades = int(item.get("unidades_base_total", item.get("cantidad_presentacion", 1)) or 1)
+    cantidad_pres = int(item.get("cantidad_presentacion", 1) or 1)
+
+    if presentacion == "bulto":
+        cant = "BULTO" if cantidad_pres == 1 else f"BULTO x{cantidad_pres}"
+        return cant, f"{unidades} und"
+
+    if presentacion == "docena":
+        nombre = str(item.get("presentacion_nombre") or item.get("presentacion_label") or "DOC").upper()
+        nombre = nombre.split(" X")[0].strip()
+        if nombre == "DOCENA":
+            nombre = "DOC"
+        cant = nombre if cantidad_pres == 1 else f"{nombre} x{cantidad_pres}"
+        return cant, f"{unidades} und"
+
+    # Para unidad con precio inteligente: solo mostrar DOC/BULTO si la escala es cerrada y exacta.
+    if "bulto" in escala and "+" not in escala:
+        n = unidades  # fallback
+        m = re.search(r"(\\d+)\\s*bulto", escala)
+        if m:
+            n = int(m.group(1))
+        return ("BULTO" if n == 1 else f"BULTO x{n}"), f"{unidades} und"
+
+    # Presentación intermedia por compra en unidades: docena, pack, caja, etc.
+    for palabra, etiqueta in [("docena", "DOC"), ("pack", "PACK"), ("caja", "CAJA"), ("paquete", "PAQ")]:
+        if palabra in escala and "+" not in escala:
+            m = re.search(r"(\d+)\s*" + palabra, escala)
+            n = int(m.group(1)) if m else 1
+            return (etiqueta if n == 1 else f"{etiqueta} x{n}"), f"{unidades} und"
+
+    return str(unidades), "und"
+
+def sku_limpio_pdf(sku_text):
+    return str(sku_text or "").split("::")[0]
+
+
+def eliminar_pedido_seguro(pedido_id):
+    rows = q("SELECT * FROM pedidos WHERE id=?", (int(pedido_id),), fetch=True)
+    if not rows:
+        return False, "Pedido no encontrado."
+    ped = rows[0]
+    if ped["credito_id"]:
+        return False, "Este pedido tiene crédito asociado. Elimina/anula primero el crédito para no perder trazabilidad."
+    q("DELETE FROM pedidos WHERE id=?", (int(pedido_id),))
+    reset_sqlite_sequence("pedidos")
+    return True, "Pedido eliminado."
+
+def eliminar_credito_y_abonos(credito_id):
+    rows = q("SELECT * FROM creditos WHERE id=?", (int(credito_id),), fetch=True)
+    if not rows:
+        return False, "Crédito no encontrado."
+    cr = rows[0]
+    q("DELETE FROM abonos WHERE credito_id=?", (int(credito_id),))
+    q("UPDATE pedidos SET credito_id=NULL, status='Anulado' WHERE credito_id=?", (int(credito_id),))
+    q("DELETE FROM creditos WHERE id=?", (int(credito_id),))
+    return True, "Crédito eliminado, abonos eliminados y pedido asociado marcado como Anulado."
+
+
+def reset_sqlite_sequence(table_name):
+    """
+    Reinicia el consecutivo AUTOINCREMENT al máximo ID actual.
+    Así, si se elimina el último registro, el próximo retoma el número anterior.
+    """
+    try:
+        rows = q(f"SELECT COALESCE(MAX(id),0) AS max_id FROM {table_name}", fetch=True)
+        max_id = int(rows[0]["max_id"] or 0)
+        exists = q("SELECT name FROM sqlite_master WHERE type='table' AND name='sqlite_sequence'", fetch=True)
+        if exists:
+            q("UPDATE sqlite_sequence SET seq=? WHERE name=?", (max_id, table_name))
+    except Exception:
+        pass
+
+def eliminar_cotizacion(cot_id):
+    q("DELETE FROM cotizaciones WHERE id=?", (int(cot_id),))
+    reset_sqlite_sequence("cotizaciones")
+
+
+def anular_credito_de_pedido(pedido_id, motivo="Pedido cancelado"):
+    rows = q("SELECT * FROM pedidos WHERE id=?", (int(pedido_id),), fetch=True)
+    if not rows:
+        return False, "Pedido no encontrado."
+    ped = rows[0]
+    if ped["credito_id"]:
+        q("UPDATE creditos SET saldo_usd=0, status='Anulado', notas=COALESCE(notas,'') || ? WHERE id=?",
+          (f"\n[{now()}] {motivo}", int(ped["credito_id"])))
+        q("UPDATE abonos SET status='Anulado' WHERE credito_id=? AND status='Pendiente de validar'", (int(ped["credito_id"]),))
+    q("UPDATE pedidos SET status='Cancelado' WHERE id=?", (int(pedido_id),))
+    return True, "Pedido cancelado y crédito asociado anulado."
+
+def marcar_credito_pagado(credito_id, actor="admin"):
+    rows = q("SELECT * FROM creditos WHERE id=?", (int(credito_id),), fetch=True)
+    if not rows:
+        return False, "Crédito no encontrado."
+    cr = rows[0]
+    tipo = str(cr["tipo_credito"] if "tipo_credito" in cr.keys() and cr["tipo_credito"] else "usd").lower()
+    if tipo == "bcv":
+        saldo = float(cr["saldo_bcv"] or cr["saldo_usd"] or 0)
+        if saldo > 0.009:
+            tasa_bcv = get_tasa_bcv()
+            q("""INSERT INTO abonos
+                 (credito_id,pedido_id,username,fecha,monto_usd,monto_bs,metodo,referencia,comprobante_path,status,validado_por,fecha_validacion,notas,
+                  tipo_credito,monto_bcv,tasa_bcv,monto_bs_esperado)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+              (cr["id"], cr["pedido_id"], cr["username"], now(), saldo, saldo*tasa_bcv, "Cierre administrativo", "CREDITO-BCV-PAGADO", None, "Validado", actor, now(), "Cierre manual de crédito BCV como pagado.",
+               "bcv", saldo, tasa_bcv, saldo*tasa_bcv))
+        q("UPDATE creditos SET saldo_bcv=0, saldo_usd=0, status='Pagado' WHERE id=?", (int(credito_id),))
+    else:
+        saldo = float(cr["saldo_usd"] or 0)
+        if saldo > 0.009:
+            tasa = get_tasa_proveedor()
+            q("""INSERT INTO abonos
+                 (credito_id,pedido_id,username,fecha,monto_usd,monto_bs,metodo,referencia,comprobante_path,status,validado_por,fecha_validacion,notas,
+                  tipo_credito,monto_bcv,tasa_bcv,monto_bs_esperado)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+              (cr["id"], cr["pedido_id"], cr["username"], now(), saldo, saldo*tasa, "Cierre administrativo", "CREDITO-PAGADO", None, "Validado", actor, now(), "Cierre manual de crédito como pagado.",
+               "usd", 0, get_tasa_bcv(), saldo*tasa))
+        q("UPDATE creditos SET saldo_usd=0, status='Pagado' WHERE id=?", (int(credito_id),))
+    q("UPDATE pedidos SET status='Finalizado / Pagado' WHERE id=?", (int(cr["pedido_id"]),))
+    return True, "Crédito marcado como Pagado y pedido como Finalizado / Pagado."
+
+def validar_stock_carrito_woocommerce(carrito):
+    """
+    Reconsulta WooCommerce antes de crear pedido.
+    Devuelve (ok, mensajes).
+    """
+    mensajes = []
+    requeridos = {}
+    for k, item in carrito.items():
+        sku = item.get("sku")
+        requeridos[sku] = requeridos.get(sku, 0) + int(item.get("unidades_base_total", 0) or 0)
+
+    for sku, req in requeridos.items():
+        try:
+            p = wc_get_by_sku(sku)
+            if not p:
+                mensajes.append(f"{sku}: no encontrado en WooCommerce.")
+                continue
+            stock_q = p.get("stock_quantity")
+            stock = 0 if stock_q is None else int(float(stock_q))
+            status = p.get("stock_status") or ""
+            # Actualiza cache local también.
+            q("""UPDATE productos SET wc_stock=?, wc_stock_status=?, wc_imagen_url=?, wc_permalink=?, ultima_sync=?, actualizado_en=? WHERE sku=?""",
+              (stock, status, first_image_url(p), p.get("permalink") or "", now(), now(), sku))
+            if status == "outofstock" or stock < req:
+                mensajes.append(f"{sku}: stock insuficiente. Requiere {req}, disponible {stock}.")
+        except Exception as e:
+            mensajes.append(f"{sku}: error consultando stock web: {e}")
+    return len(mensajes) == 0, mensajes
+
+def formato_cantidad_pdf_simple(item):
+    """
+    Cant. compacto para PDF sin columna Pres:
+    DOC, DOC x2, BULTO, BULTO x2 o 15 und.
+    """
+    cant, pres = formato_cantidad_pdf(item)
+    if cant in ["DOC", "BULTO"] or "x" in cant:
+        return cant
+    return f"{cant} {pres}".strip()
+
+# -----------------------------
+# PDF
+# -----------------------------
+def pdf_clean(text):
+    """
+    Limpia texto para FPDF clásico, que trabaja con Latin-1.
+    Evita errores en Railway/Python 3.13 al generar PDF con caracteres especiales.
+    """
+    import unicodedata
+    text = str(text or "")
+    repl = {
+        "á":"a","é":"e","í":"i","ó":"o","ú":"u","ü":"u","ñ":"n",
+        "Á":"A","É":"E","Í":"I","Ó":"O","Ú":"U","Ü":"U","Ñ":"N",
+        "–":"-","—":"-","“":"\"","”":"\"","’":"'",
+        "•":"-","→":"->","×":"x","º":"o","ª":"a",
+        "📦":"","💵":"","🧱":"","✅":"","❌":"","🔎":"","🛒":"",
+        "📄":"","🧾":"","💳":"","📈":"","📊":"","⚙️":"","💾":"",
+        "🗂️":"","👥":"","🛍️":"","👤":"","📢":"","💰":"","🌐":"",
+        "📸":"","📍":"","💬":"","⚠️":"","🟡":""
+    }
+    for a, b in repl.items():
+        text = text.replace(a, b)
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    return text.encode("latin-1", "replace").decode("latin-1")
+
+def pdf_force_latin1(pdf):
+    """
+    FPDF 1.x codifica páginas completas en latin1 al cerrar.
+    Esta limpieza final evita que cualquier carácter no Latin-1 sobreviviente rompa pdf.output().
+    """
+    try:
+        for n in list(pdf.pages.keys()):
+            pdf.pages[n] = pdf.pages[n].encode("latin-1", "replace").decode("latin-1")
+    except Exception:
+        pass
+    return pdf
+
+def generar_pdf_cotizacion(cot_id):
+    rows = q("SELECT * FROM cotizaciones WHERE id=?", (cot_id,), fetch=True)
+    if not rows:
+        return b""
+    cot = rows[0]
+    items = json.loads(cot["items"] or "{}")
+
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=14)
+    pdf.add_page()
+    pdf.set_font("Arial", "B", 16)
+    pdf.cell(190, 8, pdf_clean(get_config("nombre_empresa", "Sistema de Insumos al Mayor")), ln=1, align="C")
+    pdf.set_font("Arial", "", 9)
+    pdf.cell(190, 5, pdf_clean(f"Contacto: {get_config('telefono_empresa','')} | Instagram: {get_config('instagram_empresa','')}"), ln=1, align="C")
+    pdf.ln(4)
+
+    pdf.set_font("Arial", "B", 13)
+    pdf.cell(190, 8, pdf_clean(f"COTIZACION #{cot_id}"), ln=1)
+    pdf.set_font("Arial", "", 9)
+    vence = ""
+    try:
+        fecha_dt = datetime.strptime(cot["fecha"], "%d/%m/%Y %H:%M")
+        vence = (fecha_dt + timedelta(days=int(cot["validez_dias"] or 1))).strftime("%d/%m/%Y")
+    except Exception:
+        vence = "N/A"
+    pdf.cell(95, 6, pdf_clean(f"Fecha: {cot['fecha']}"), ln=0)
+    pdf.cell(95, 6, pdf_clean(f"Valida hasta: {vence}"), ln=1)
+    pdf.cell(95, 6, pdf_clean(f"Cliente: {cot['cliente_nombre'] or cot['username']}"), ln=0)
+    pdf.cell(95, 6, pdf_clean(f"RIF/CI: {cot['cliente_rif'] or 'N/A'}"), ln=1)
+    pdf.cell(95, 6, pdf_clean(f"Telefono: {cot['cliente_telefono'] or 'N/A'}"), ln=0)
+    pdf.cell(95, 6, pdf_clean(f"Tasa proveedor: {cot['tasa_proveedor']}"), ln=1)
+    if cot["cliente_direccion"]:
+        pdf.multi_cell(190, 5, pdf_clean(f"Direccion: {cot['cliente_direccion']}"))
+    pdf.ln(4)
+
+    pdf.set_fill_color(230, 230, 230)
+    # Columnas ajustadas para evitar que la presentación invada el SKU.
+    headers = [("Cant.",28),("SKU",42),("Descripcion",78),("Precio",21),("Total",21)]
+    pdf.set_font("Arial", "B", 8)
+    for h,w in headers:
+        pdf.cell(w, 7, pdf_clean(h), 1, 0, "C", True)
+    pdf.ln()
+
+    pdf.set_font("Arial", "", 8)
+    for sku, d in items.items():
+        desc = pdf_clean(d.get("desc", ""))[:45]
+        cant_txt = formato_cantidad_pdf_simple(d)
+        sku_txt = sku_limpio_pdf(d.get("sku", sku))
+        vals = [
+            cant_txt[:16],
+            sku_txt[:26],
+            desc,
+            money_usd(d.get("precio_total", 0)),
+            money_usd(d.get("precio_total", 0)),
+        ]
+        for val, (_, w) in zip(vals, headers):
+            align = "R" if val.startswith("$") else "L"
+            pdf.cell(w, 7, pdf_clean(val), 1, 0, align)
+        pdf.ln()
+
+    pdf.ln(4)
+    pdf.set_font("Arial", "B", 10)
+    pdf.cell(140, 7, "", ln=0)
+    pdf.cell(28, 7, "Subtotal:", 1, 0, "R")
+    pdf.cell(22, 7, money_usd(cot["subtotal_usd"]), 1, 1, "R")
+    pdf.cell(140, 7, "", ln=0)
+    pdf.cell(28, 7, "Envio:", 1, 0, "R")
+    pdf.cell(22, 7, money_usd(cot["envio_usd"]), 1, 1, "R")
+    pdf.cell(140, 8, "", ln=0)
+    pdf.cell(28, 8, "TOTAL:", 1, 0, "R")
+    pdf.cell(22, 8, money_usd(cot["total_usd"]), 1, 1, "R")
+    pdf.set_font("Arial", "", 9)
+    pdf.cell(190, 7, pdf_clean(f"Equivalente Bs: {money_bs(cot['total_bs_proveedor'])}"), ln=1, align="R")
+
+    if cot["notas"]:
+        pdf.ln(4)
+        pdf.set_font("Arial", "", 9)
+        pdf.multi_cell(190, 5, pdf_clean(f"Notas: {cot['notas']}"))
+
+    pdf.ln(5)
+    pdf.set_font("Arial", "I", 8)
+    pdf.multi_cell(190, 5, pdf_clean("Cotizacion sujeta a disponibilidad al momento de confirmar el pedido. Precios y tasa sujetos a cambio luego del vencimiento."))
+    pdf_force_latin1(pdf)
+    out = pdf.output(dest="S")
+    if isinstance(out, str):
+        return out.encode("latin-1", "replace")
+    return bytes(out)
+
+
+def generar_pdf_pedido(pedido_id):
+    rows = q("SELECT * FROM pedidos WHERE id=?", (pedido_id,), fetch=True)
+    if not rows:
+        return b""
+    ped = rows[0]
+    items = json.loads(ped["items"] or "{}")
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=14)
+    pdf.add_page()
+    pdf.set_font("Arial", "B", 16)
+    pdf.cell(190, 8, pdf_clean(get_config("nombre_empresa", "Sistema de Insumos al Mayor")), ln=1, align="C")
+    pdf.set_font("Arial", "", 9)
+    pdf.cell(190, 5, pdf_clean(f"Contacto: {get_config('telefono_empresa','')} | Instagram: {get_config('instagram_empresa','')}"), ln=1, align="C")
+    pdf.ln(4)
+    pdf.set_font("Arial", "B", 13)
+    pdf.cell(190, 8, pdf_clean(f"PEDIDO / NOTA #{pedido_id}"), ln=1)
+    pdf.set_font("Arial", "", 9)
+    pdf.cell(95, 6, pdf_clean(f"Fecha: {ped['fecha']}"), ln=0)
+    pdf.cell(95, 6, pdf_clean(f"Estado: {ped['status']}"), ln=1)
+    pdf.cell(95, 6, pdf_clean(f"Cliente: {ped['cliente_nombre'] or ped['username']}"), ln=0)
+    pdf.cell(95, 6, pdf_clean(f"RIF/CI: {ped['cliente_rif'] or 'N/A'}"), ln=1)
+    pdf.cell(95, 6, pdf_clean(f"Tipo pago: {ped['tipo_pago']}"), ln=0)
+    pdf.cell(95, 6, pdf_clean(f"Metodo: {ped['metodo_pago'] or 'N/A'}"), ln=1)
+    if ped["cliente_direccion"]:
+        pdf.multi_cell(190, 5, pdf_clean(f"Direccion: {ped['cliente_direccion']}"))
+    pdf.ln(4)
+
+    pdf.set_fill_color(230, 230, 230)
+    # Columnas ajustadas para evitar que la presentación invada el SKU.
+    headers = [("Cant.",28),("SKU",42),("Descripcion",78),("Precio",21),("Total",21)]
+    pdf.set_font("Arial", "B", 8)
+    for h,w in headers:
+        pdf.cell(w, 7, pdf_clean(h), 1, 0, "C", True)
+    pdf.ln()
+    pdf.set_font("Arial", "", 8)
+    for k, d in items.items():
+        cant_txt = formato_cantidad_pdf_simple(d)
+        sku_txt = sku_limpio_pdf(d.get("sku", k))
+        vals = [
+            cant_txt[:16],
+            sku_txt[:26],
+            pdf_clean(d.get("desc", ""))[:50],
+            money_usd(d.get("precio_total", 0)),
+            money_usd(d.get("precio_total", 0)),
+        ]
+        for val, (_, w) in zip(vals, headers):
+            pdf.cell(w, 7, pdf_clean(val), 1, 0, "R" if str(val).startswith("$") else "L")
+        pdf.ln()
+
+    pdf.ln(4)
+    pdf.set_font("Arial", "B", 10)
+    for label, val in [("Subtotal:", ped["subtotal_usd"]), ("Envio:", ped["envio_usd"]), ("TOTAL:", ped["total_usd"])]:
+        pdf.cell(140, 7, "", ln=0)
+        pdf.cell(28, 7, label, 1, 0, "R")
+        pdf.cell(22, 7, money_usd(val), 1, 1, "R")
+    pdf.set_font("Arial", "", 9)
+    pdf.cell(190, 7, pdf_clean(f"Equivalente Bs proveedor: {money_bs(ped['total_bs_proveedor'])}"), ln=1, align="R")
+    try:
+        if str(ped["credito_tipo"] or "").lower() == "bcv":
+            pdf.ln(2)
+            pdf.set_font("Arial", "B", 9)
+            pdf.multi_cell(190, 5, pdf_clean("NOTA CREDITO BCV: Este credito se expresa en $ BCV. Cada abono se cancelara en bolivares a la tasa BCV vigente del dia en que el cliente registre el pago. La tasa BCV puede variar diariamente."))
+            pdf.set_font("Arial", "", 9)
+            pdf.cell(190, 6, pdf_clean(f"Monto credito BCV inicial: {money_usd(ped['total_bcv_credito'])} BCV | Tasa BCV creacion: {float(ped['tasa_bcv'] or 0):,.2f}"), ln=1)
+    except Exception:
+        pass
+    if ped["notas"]:
+        pdf.ln(3)
+        pdf.multi_cell(190, 5, pdf_clean(f"Notas: {ped['notas']}"))
+    pdf_force_latin1(pdf)
+    out = pdf.output(dest="S")
+    if isinstance(out, str):
+        return out.encode("latin-1", "replace")
+    return bytes(out)
+
+def generar_pdf_estado_cuenta(username):
+    user = get_user(username)
+    if not user:
+        return b""
+    creditos = pd.read_sql_query("SELECT * FROM creditos WHERE username=? ORDER BY id DESC", get_conn(), params=(username,))
+    abonos = pd.read_sql_query("SELECT * FROM abonos WHERE username=? ORDER BY id DESC", get_conn(), params=(username,))
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=14)
+    pdf.add_page()
+    pdf.set_font("Arial", "B", 16)
+    pdf.cell(190, 8, pdf_clean(get_config("nombre_empresa", "Sistema de Insumos al Mayor")), ln=1, align="C")
+    pdf.ln(4)
+    pdf.set_font("Arial", "B", 13)
+    pdf.cell(190, 8, "ESTADO DE CUENTA", ln=1)
+    pdf.set_font("Arial", "", 9)
+    pdf.cell(95, 6, pdf_clean(f"Cliente: {user['nombre'] or username}"), ln=0)
+    pdf.cell(95, 6, pdf_clean(f"Fecha: {now()}"), ln=1)
+    saldo_total = float(creditos["saldo_usd"].sum()) if not creditos.empty else 0.0
+    pdf.set_font("Arial", "B", 11)
+    pdf.cell(190, 8, pdf_clean(f"Saldo pendiente: {money_usd(saldo_total)}"), ln=1)
+    pdf.ln(3)
+    pdf.set_font("Arial", "B", 8)
+    headers = [("Credito",18),("Pedido",18),("Inicio",32),("Vence",28),("Monto",28),("Saldo",28),("Estado",38)]
+    for h,w in headers:
+        pdf.cell(w, 7, h, 1, 0, "C", True)
+    pdf.ln()
+    pdf.set_font("Arial", "", 8)
+    if creditos.empty:
+        pdf.cell(190, 7, "Sin creditos.", 1, 1)
+    else:
+        for _, cr in creditos.iterrows():
+            vals = [f"#{int(cr['id'])}", f"#{int(cr['pedido_id'])}", cr["fecha_inicio"], cr["fecha_vencimiento"], money_usd(cr["monto_usd"]), money_usd(cr["saldo_usd"]), cr["status"]]
+            for val, (_,w) in zip(vals, headers):
+                pdf.cell(w, 7, pdf_clean(val), 1, 0, "C")
+            pdf.ln()
+    pdf.ln(5)
+    pdf.set_font("Arial", "B", 10)
+    pdf.cell(190, 7, "ABONOS", ln=1)
+    pdf.set_font("Arial", "", 8)
+    if abonos.empty:
+        pdf.cell(190, 7, "Sin abonos registrados.", 1, 1)
+    else:
+        for _, ab in abonos.iterrows():
+            pdf.cell(190, 6, pdf_clean(f"#{int(ab['id'])} Credito #{int(ab['credito_id'])} | {ab['fecha']} | {money_usd(ab['monto_usd'])} | {ab['metodo']} | {ab['status']}"), ln=1)
+    pdf_force_latin1(pdf)
+    out = pdf.output(dest="S")
+    if isinstance(out, str):
+        return out.encode("latin-1", "replace")
+    return bytes(out)
+
+
+# -----------------------------
+# AUTH
+# -----------------------------
+def login_screen():
+    st.title("🔐 Sistema de Insumos al Mayor")
+    st.caption("Acceso para administradores y compradores")
+    with st.form("login"):
+        u = st.text_input("Usuario / correo")
+        p = st.text_input("Contraseña", type="password")
+        submit = st.form_submit_button("Entrar", type="primary", use_container_width=True)
+    if submit:
+        row = get_user(u.strip())
+        if row and int(row["activo"] or 0) == 1 and verify_password(p, row["password_hash"]):
+            st.session_state.auth = True
+            st.session_state.user = {"username": row["username"], "nombre": row["nombre"], "rol": row["rol"]}
+            st.rerun()
+        else:
+            st.error("Credenciales incorrectas o usuario inactivo.")
+
+def logout():
+    st.session_state.auth = False
+    st.session_state.user = None
+    st.rerun()
+
+# -----------------------------
+# ADMIN
+# -----------------------------
+def admin_config():
+    st.title("⚙️ Configuración")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.subheader("Tasas")
+        tasa_prov = st.number_input("Tasa proveedor", min_value=0.0, value=get_tasa_proveedor(), step=0.01)
+        tasa_bcv = st.number_input("Tasa BCV", min_value=0.0, value=get_tasa_bcv(), step=0.01)
+        if st.button("💾 Guardar tasas", type="primary"):
+            set_config("tasa_proveedor", tasa_prov)
+            set_config("tasa_bcv", tasa_bcv)
+            set_config("fecha_tasa_bcv", now())
+            st.success("Tasas guardadas.")
+            st.rerun()
+        if st.button("🌐 Obtener BCV desde web"):
+            val, fuente = obtener_bcv_web()
+            if val:
+                set_config("tasa_bcv", val)
+                set_config("fecha_tasa_bcv", now())
+                set_config("fuente_tasa_bcv", fuente)
+                st.success(f"BCV actualizado: {val}")
+                st.rerun()
+            else:
+                st.error(fuente)
+
+    with c2:
+        st.subheader("Empresa y cotización")
+        nombre = st.text_input("Nombre empresa", value=get_config("nombre_empresa", "Sistema de Insumos al Mayor"))
+        tel = st.text_input("Teléfono", value=get_config("telefono_empresa", "04127757053"))
+        ig = st.text_input("Instagram", value=get_config("instagram_empresa", "@color.insumos"))
+        validez = st.number_input("Validez cotización en días", min_value=1, max_value=30, value=int(parse_float(get_config("validez_cotizacion_dias", "1"), 1)))
+        envio = st.number_input("Envío sugerido MercadoLibre >10kg hasta 40kg", min_value=0.0, value=parse_float(get_config("envio_ml_10_40_usd", "10"), 10), step=0.5)
+        comision_ml = st.number_input("% comisión MercadoLibre", min_value=0.0, max_value=80.0, value=get_comision_ml_pct(), step=0.5)
+        if st.button("💾 Guardar configuración", type="primary", key="save_empresa"):
+            set_config("nombre_empresa", nombre)
+            set_config("telefono_empresa", tel)
+            set_config("instagram_empresa", ig)
+            set_config("validez_cotizacion_dias", validez)
+            set_config("envio_ml_10_40_usd", envio)
+            set_config("comision_mercadolibre_pct", comision_ml)
+            set_config("stock_auto_sync_minutos", stock_auto_sync_minutos)
+            st.success("Configuración guardada.")
+
+    st.markdown("---")
+    st.subheader("WooCommerce")
+    if wc_ready():
+        st.success(f".env cargado. Sitio: {WC_URL}")
+    else:
+        st.error("Faltan WC_URL, WC_KEY o WC_SECRET en .env")
+    if st.button("🔄 Sincronizar todos los productos activos con WooCommerce", type="primary"):
+        with st.spinner("Sincronizando..."):
+            ok, no, errors = sync_todos_productos()
+        st.success(f"Sincronizados: {ok}. No sincronizados: {no}.")
+        if errors:
+            st.warning("Algunos errores:")
+            st.code("\n".join(errors))
+
+def admin_categorias():
+    st.title("🗂️ Categorías")
+    st.caption("Las categorías eliminadas ya no se regeneran automáticamente al reiniciar la app.")
+    with st.form("crear_cat"):
+        c1, c2, c3 = st.columns([2,3,1])
+        nombre = c1.text_input("Nueva categoría")
+        descripcion = c2.text_input("Descripción")
+        orden = c3.number_input("Orden", min_value=0, value=0)
+        submit = st.form_submit_button("Crear categoría", type="primary")
+    if submit:
+        if not nombre.strip():
+            st.error("Nombre requerido.")
+        else:
+            try:
+                q("INSERT INTO categorias (nombre, descripcion, activa, orden, creado_en) VALUES (?,?,?,?,?)",
+                  (nombre.strip(), descripcion, 1, int(orden), now()))
+                set_feedback(f"Categoría creada correctamente: {nombre.strip()}.", "success")
+                st.rerun()
+            except Exception as e:
+                st.error(f"No se pudo crear: {e}")
+
+    st.subheader("Editar categorías")
+    cats = categorias_todas()
+    for cat in cats:
+        with st.expander(f"{cat['nombre']} {'✅' if cat['activa'] else '🚫'}"):
+            with st.form(f"edit_cat_{cat['id']}"):
+                nombre_e = st.text_input("Nombre", value=cat["nombre"], key=f"catn_{cat['id']}")
+                desc_e = st.text_input("Descripción", value=cat["descripcion"] or "", key=f"catd_{cat['id']}")
+                orden_e = st.number_input("Orden", min_value=0, value=int(cat["orden"] or 0), key=f"cato_{cat['id']}")
+                activa_e = st.checkbox("Activa", value=bool(cat["activa"]), key=f"cata_{cat['id']}")
+                save = st.form_submit_button("Guardar cambios")
+            if save:
+                q("UPDATE categorias SET nombre=?, descripcion=?, activa=?, orden=? WHERE id=?",
+                  (nombre_e.strip(), desc_e, 1 if activa_e else 0, int(orden_e), cat["id"]))
+                st.success("Actualizada.")
+                st.rerun()
+            confirmar_del_cat = st.checkbox("Confirmar eliminación de categoría", key=f"confirm_del_cat_{cat['id']}")
+            if st.button("🗑️ Eliminar categoría", key=f"del_cat_{cat['id']}", disabled=not confirmar_del_cat):
+                usados = q("SELECT COUNT(*) AS n FROM productos WHERE categoria_id=?", (cat["id"],), fetch=True)[0]["n"]
+                if usados:
+                    st.error("No se puede eliminar: hay productos en esta categoría. Muévelos primero o desactiva la categoría.")
+                else:
+                    q("DELETE FROM categorias WHERE id=?", (cat["id"],))
+                    st.success("Categoría eliminada.")
+                    st.rerun()
+
+def admin_productos():
+    st.title("📦 Productos")
+    tab_list, tab_form = st.tabs(["Listado", "Crear / Editar"])
+
+    with tab_list:
+        bus = st.text_input("Buscar por SKU o descripción")
+        sql = """SELECT p.*, c.nombre AS categoria
+                 FROM productos p LEFT JOIN categorias c ON p.categoria_id=c.id
+                 WHERE 1=1"""
+        params = []
+        if bus:
+            sql += " AND (p.sku LIKE ? OR p.descripcion LIKE ?)"
+            params.extend([f"%{bus}%", f"%{bus}%"])
+        sql += " ORDER BY p.activo DESC, c.orden, p.descripcion"
+        df = pd.read_sql_query(sql, get_conn(), params=params)
+        st.dataframe(df[["sku","descripcion","categoria","precio_unidad","presentacion_intermedia_nombre","presentacion_intermedia_cantidad","precio_docena","precio_bulto","maneja_precio_especial","precio_especial_unidad","precio_especial_docena","precio_especial_bulto","bulto_contiene","wc_stock","activo","ultima_sync"]], use_container_width=True, hide_index=True)
+
+    with tab_form:
+        st.subheader("Crear o editar producto")
+        sku_e = st.text_input("SKU")
+        prod = q("SELECT * FROM productos WHERE sku=?", (sku_e.strip(),), fetch=True) if sku_e.strip() else []
+        prod = prod[0] if prod else None
+
+        cats = categorias_todas()
+        cat_options = {f"{c['nombre']} {'(inactiva)' if not c['activa'] else ''}": c["id"] for c in cats}
+        cat_names = list(cat_options.keys())
+
+        current_cat_name = cat_names[0] if cat_names else None
+        if prod:
+            for name, cid in cat_options.items():
+                if cid == prod["categoria_id"]:
+                    current_cat_name = name
+                    break
+
+        with st.form("producto_form"):
+            desc = st.text_input("Descripción", value=prod["descripcion"] if prod else "")
+            cat_sel = st.selectbox("Categoría", cat_names, index=cat_names.index(current_cat_name) if current_cat_name in cat_names else 0)
+            unidad_base = st.selectbox("Unidad base", ["unidad", "paquete", "rollo", "litro", "caja"], index=["unidad","paquete","rollo","litro","caja"].index(prod["unidad_base"]) if prod and prod["unidad_base"] in ["unidad","paquete","rollo","litro","caja"] else 0)
+
+            c1, c2, c3 = st.columns(3)
+            precio_unidad = c1.number_input("Precio unidad USD", min_value=0.0, value=float(prod["precio_unidad"] if prod else 0), step=0.01)
+            precio_docena = c2.number_input("Precio presentación intermedia c/u USD", min_value=0.0, value=float(prod["precio_docena"] if prod else 0), step=0.01, help="Usa este campo para Docena, Pack x10, Caja, Paquete, etc. Es precio unitario dentro de esa presentación.")
+            precio_bulto = c3.number_input("Precio bulto c/u USD", min_value=0.0, value=float(prod["precio_bulto"] if prod else 0), step=0.01)
+
+            st.markdown("#### Precio especial opcional")
+            pe0, pe1, pe2, pe3 = st.columns(4)
+            maneja_precio_especial = pe0.checkbox("Maneja precio especial", value=bool(prod["maneja_precio_especial"]) if prod and "maneja_precio_especial" in prod.keys() else False)
+            precio_especial_unidad = pe1.number_input("Especial unidad USD", min_value=0.0, value=float(prod["precio_especial_unidad"] if prod and "precio_especial_unidad" in prod.keys() else 0), step=0.01, disabled=not maneja_precio_especial)
+            precio_especial_docena = pe2.number_input("Especial presentación TOTAL USD", min_value=0.0, value=float(prod["precio_especial_docena"] if prod and "precio_especial_docena" in prod.keys() else 0), step=0.01, disabled=not maneja_precio_especial)
+            precio_especial_bulto = pe3.number_input("Especial bulto TOTAL USD", min_value=0.0, value=float(prod["precio_especial_bulto"] if prod and "precio_especial_bulto" in prod.keys() else 0), step=0.01, disabled=not maneja_precio_especial)
+
+            c4, c5, c6, c7 = st.columns(4)
+            maneja_docena = c4.checkbox("Maneja presentación intermedia", value=bool(prod["maneja_docena"]) if prod else True)
+            nombre_intermedio_actual = producto_intermedia_nombre(prod) if prod else "Docena"
+            opciones_intermedias = ["Docena", "Pack", "Caja", "Paquete"]
+            if nombre_intermedio_actual not in opciones_intermedias:
+                opciones_intermedias.append(nombre_intermedio_actual)
+            presentacion_intermedia_nombre = c5.selectbox("Nombre", opciones_intermedias, index=opciones_intermedias.index(nombre_intermedio_actual))
+            presentacion_intermedia_cantidad = c6.number_input("Contiene unidades", min_value=1, max_value=9999, value=producto_intermedia_cantidad(prod) if prod else 12, step=1)
+            maneja_bulto = c7.checkbox("Maneja bulto", value=bool(prod["maneja_bulto"]) if prod else True)
+
+            c8, c9 = st.columns(2)
+            bulto_contiene = c8.number_input("Bulto contiene unidades base", min_value=1, max_value=9999, value=int(prod["bulto_contiene"] if prod and prod["bulto_contiene"] else 1), step=1)
+
+            c10, c11 = st.columns(2)
+            peso = c10.number_input("Peso por unidad base KG (interno admin)", min_value=0.0, value=float(prod["peso_unidad_kg"] if prod else 0), step=0.01)
+            activo = c11.checkbox("Producto activo", value=bool(prod["activo"]) if prod else True)
+
+            st.markdown("#### Costos internos / rentabilidad")
+            cc1, cc2, cc3, cc4 = st.columns(4)
+            costo_proveedor_unitario = cc1.number_input("Costo proveedor unitario", min_value=0.0, value=float(prod["costo_proveedor_unitario"] if prod and "costo_proveedor_unitario" in prod.keys() else 0), step=0.01)
+            envio_costo_bulto = cc2.number_input("Envío costo por bulto", min_value=0.0, value=float(prod["envio_costo_bulto"] if prod and "envio_costo_bulto" in prod.keys() else 0), step=0.01)
+            otros_costos_bulto = cc3.number_input("Otros costos por bulto", min_value=0.0, value=float(prod["otros_costos_bulto"] if prod and "otros_costos_bulto" in prod.keys() else 0), step=0.01)
+            margen_minimo_pct = cc4.number_input("Margen mínimo %", min_value=0.0, max_value=100.0, value=float(prod["margen_minimo_pct"] if prod and "margen_minimo_pct" in prod.keys() else 25), step=1.0)
+
+            st.markdown("#### Seguimiento de publicación")
+            pp1, pp2, pp3, pp4, pp5 = st.columns(5)
+            pub_web = pp1.checkbox("Web", value=bool(prod["pub_web"]) if prod and "pub_web" in prod.keys() else False)
+            pub_instagram = pp2.checkbox("Instagram", value=bool(prod["pub_instagram"]) if prod and "pub_instagram" in prod.keys() else False)
+            pub_mercadolibre = pp3.checkbox("MercadoLibre", value=bool(prod["pub_mercadolibre"]) if prod and "pub_mercadolibre" in prod.keys() else False)
+            pub_marketplace = pp4.checkbox("Marketplace", value=bool(prod["pub_marketplace"]) if prod and "pub_marketplace" in prod.keys() else False)
+            pub_whatsapp = pp5.checkbox("WhatsApp", value=bool(prod["pub_whatsapp"]) if prod and "pub_whatsapp" in prod.keys() else False)
+            link_instagram = st.text_input("Link Instagram", value=prod["link_instagram"] if prod and "link_instagram" in prod.keys() and prod["link_instagram"] else "")
+            link_mercadolibre = st.text_input("Link MercadoLibre", value=prod["link_mercadolibre"] if prod and "link_mercadolibre" in prod.keys() and prod["link_mercadolibre"] else "")
+            link_marketplace = st.text_input("Link Marketplace", value=prod["link_marketplace"] if prod and "link_marketplace" in prod.keys() and prod["link_marketplace"] else "")
+            notas_publicacion = st.text_area("Notas de publicación", value=prod["notas_publicacion"] if prod and "notas_publicacion" in prod.keys() and prod["notas_publicacion"] else "")
+
+            guardar = st.form_submit_button("💾 Guardar producto", type="primary")
+
+        if guardar:
+            if not sku_e.strip() or not desc.strip():
+                st.error("SKU y descripción son obligatorios.")
+            else:
+                cat_id = cat_options[cat_sel]
+                q("""INSERT INTO productos
+                     (sku, descripcion, categoria_id, unidad_base, precio_unidad, precio_docena, precio_bulto,
+                      bulto_contiene, maneja_docena, maneja_bulto, presentacion_intermedia_nombre, presentacion_intermedia_cantidad,
+                      maneja_precio_especial, precio_especial_unidad, precio_especial_docena, precio_especial_bulto,
+                      peso_unidad_kg, activo,
+                      costo_proveedor_unitario, envio_costo_bulto, otros_costos_bulto, margen_minimo_pct,
+                      pub_web, pub_instagram, pub_mercadolibre, pub_marketplace, pub_whatsapp,
+                      link_instagram, link_mercadolibre, link_marketplace, notas_publicacion,
+                      creado_en, actualizado_en)
+                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     ON CONFLICT(sku) DO UPDATE SET
+                     descripcion=excluded.descripcion,
+                     categoria_id=excluded.categoria_id,
+                     unidad_base=excluded.unidad_base,
+                     precio_unidad=excluded.precio_unidad,
+                     precio_docena=excluded.precio_docena,
+                     precio_bulto=excluded.precio_bulto,
+                     bulto_contiene=excluded.bulto_contiene,
+                     maneja_docena=excluded.maneja_docena,
+                     maneja_bulto=excluded.maneja_bulto,
+                     presentacion_intermedia_nombre=excluded.presentacion_intermedia_nombre,
+                     presentacion_intermedia_cantidad=excluded.presentacion_intermedia_cantidad,
+                     maneja_precio_especial=excluded.maneja_precio_especial,
+                     precio_especial_unidad=excluded.precio_especial_unidad,
+                     precio_especial_docena=excluded.precio_especial_docena,
+                     precio_especial_bulto=excluded.precio_especial_bulto,
+                     peso_unidad_kg=excluded.peso_unidad_kg,
+                     activo=excluded.activo,
+                     costo_proveedor_unitario=excluded.costo_proveedor_unitario,
+                     envio_costo_bulto=excluded.envio_costo_bulto,
+                     otros_costos_bulto=excluded.otros_costos_bulto,
+                     margen_minimo_pct=excluded.margen_minimo_pct,
+                     pub_web=excluded.pub_web,
+                     pub_instagram=excluded.pub_instagram,
+                     pub_mercadolibre=excluded.pub_mercadolibre,
+                     pub_marketplace=excluded.pub_marketplace,
+                     pub_whatsapp=excluded.pub_whatsapp,
+                     link_instagram=excluded.link_instagram,
+                     link_mercadolibre=excluded.link_mercadolibre,
+                     link_marketplace=excluded.link_marketplace,
+                     notas_publicacion=excluded.notas_publicacion,
+                     actualizado_en=excluded.actualizado_en""",
+                  (sku_e.strip(), desc.strip(), cat_id, unidad_base, precio_unidad, precio_docena, precio_bulto,
+                   int(bulto_contiene), 1 if maneja_docena else 0, 1 if maneja_bulto else 0, presentacion_intermedia_nombre, int(presentacion_intermedia_cantidad),
+                   1 if maneja_precio_especial else 0, precio_especial_unidad, precio_especial_docena, precio_especial_bulto,
+                   peso, 1 if activo else 0,
+                   costo_proveedor_unitario, envio_costo_bulto, otros_costos_bulto, margen_minimo_pct,
+                   1 if pub_web else 0, 1 if pub_instagram else 0, 1 if pub_mercadolibre else 0, 1 if pub_marketplace else 0, 1 if pub_whatsapp else 0,
+                   link_instagram, link_mercadolibre, link_marketplace, notas_publicacion,
+                   now(), now()))
+                st.success("Producto guardado.")
+                set_feedback(f"Producto guardado correctamente: {sku_e.strip()}.", "success")
+                try:
+                    ok, msg = sync_producto_wc(sku_e.strip())
+                    if ok:
+                        st.info(f"WooCommerce: {msg}")
+                    else:
+                        st.warning(f"WooCommerce: {msg}")
+                except Exception as e:
+                    st.warning(f"Guardado local, pero no se pudo sincronizar WooCommerce: {e}")
+                st.rerun()
+
+        if prod:
+            st.markdown("---")
+            st.subheader("Datos WooCommerce actuales")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Stock web", prod["wc_stock"] or 0)
+            c2.write(f"Estado: **{prod['wc_stock_status'] or 'N/A'}**")
+            c3.write(f"Última sync: **{prod['ultima_sync'] or 'Nunca'}**")
+            if prod["wc_imagen_url"]:
+                st.image(prod["wc_imagen_url"], width=250)
+            if st.button("🔄 Sincronizar este SKU con WooCommerce"):
+                try:
+                    ok, msg = sync_producto_wc(prod["sku"])
+                    if ok:
+                        st.success(msg)
+                    else:
+                        st.warning(msg)
+                    st.rerun()
+                except Exception as e:
+                    st.error(e)
+            st.markdown("---")
+            confirmar_prod = st.checkbox("Confirmar acción sobre este producto", key=f"confirm_prod_{prod['sku']}")
+            cdel1, cdel2 = st.columns(2)
+            if cdel1.button("🚫 Desactivar producto", disabled=not confirmar_prod, use_container_width=True):
+                q("UPDATE productos SET activo=0 WHERE sku=?", (prod["sku"],))
+                st.warning("Producto desactivado.")
+                st.rerun()
+            if cdel2.button("🗑️ Eliminar producto", disabled=not confirmar_prod, use_container_width=True):
+                en_pedidos = q("SELECT COUNT(*) AS n FROM pedidos WHERE items LIKE ?", (f"%{prod['sku']}%",), fetch=True)[0]["n"]
+                if en_pedidos:
+                    st.error("Este producto aparece en pedidos. Desactívalo para conservar historial.")
+                else:
+                    q("DELETE FROM productos WHERE sku=?", (prod["sku"],))
+                    st.success("Producto eliminado.")
+                    st.rerun()
+
+def mi_perfil():
+    st.title("👤 Mi perfil")
+    user_actual = get_user(st.session_state.user["username"])
+    if not user_actual:
+        st.error("No se pudo cargar tu perfil. Cierra sesión e inicia nuevamente.")
+        return
+
+    st.caption("Actualiza tus datos de contacto y entrega. El usuario, rol y condiciones de crédito solo puede cambiarlos el administrador.")
+
+    with st.form("form_mi_perfil"):
+        c1, c2 = st.columns(2)
+        nombre = c1.text_input("Nombre / razón social", value=user_actual["nombre"] or "")
+        email = c2.text_input("Correo", value=(user_actual["email"] if "email" in user_actual.keys() and user_actual["email"] else ""))
+
+        c3, c4, c5 = st.columns(3)
+        telefono = c3.text_input("Teléfono", value=user_actual["telefono"] or "")
+        rif = c4.text_input("RIF / CI", value=user_actual["rif"] or "")
+        ciudad = c5.text_input("Ciudad", value=user_actual["ciudad"] or "")
+
+        direccion = st.text_area("Dirección fiscal / entrega", value=user_actual["direccion"] or "")
+        password = st.text_input("Cambiar contraseña", type="password", help="Déjalo vacío si no deseas cambiarla.")
+
+        st.info(
+            f"Usuario de acceso: {user_actual['username']}\n\n"
+            f"Rol: {user_actual['rol']}\n\n"
+            f"Condición especial: {'Activa' if int(user_actual['cliente_especial'] if 'cliente_especial' in user_actual.keys() and user_actual['cliente_especial'] is not None else 0) == 1 else 'No activa'}\n\n"
+            f"Crédito normal: {'Activo' if int(user_actual['credito_habilitado'] or 0) == 1 else 'No activo'}\n\n"
+            f"Crédito BCV: {'Activo' if int(user_actual['credito_bcv_habilitado'] if 'credito_bcv_habilitado' in user_actual.keys() and user_actual['credito_bcv_habilitado'] is not None else 0) == 1 else 'No activo'}\n\n"
+            "Para cambiar usuario, rol, crédito, límite o días de crédito, contacta al administrador."
+        )
+
+        submit = st.form_submit_button("💾 Guardar mi perfil", type="primary")
+
+    if submit:
+        if not nombre.strip():
+            st.error("El nombre / razón social no puede quedar vacío.")
+            return
+        if email and email_existe(email, excluir_username=user_actual["username"]):
+            st.error("Ese correo ya está usado por otro usuario.")
+            return
+
+        if password:
+            q("""UPDATE usuarios SET nombre=?, email=?, telefono=?, rif=?, ciudad=?, direccion=?, password_hash=? WHERE username=?""",
+              (nombre, email, telefono, rif, ciudad, direccion, hash_password(password), user_actual["username"]))
+        else:
+            q("""UPDATE usuarios SET nombre=?, email=?, telefono=?, rif=?, ciudad=?, direccion=? WHERE username=?""",
+              (nombre, email, telefono, rif, ciudad, direccion, user_actual["username"]))
+
+        refreshed = get_user(user_actual["username"])
+        if refreshed:
+            st.session_state.user = dict(refreshed)
+        set_feedback("Perfil actualizado correctamente.", "success")
+        st.rerun()
+
+
+def admin_usuarios():
+    st.title("👥 Usuarios / Clientes")
+    tab1, tab2 = st.tabs(["Listado / Cliente 360", "Crear / Editar"])
+
+    with tab1:
+        df = pd.read_sql_query(
+            "SELECT id_usuario,username,email,nombre,rol,telefono,rif,ciudad,activo,cliente_especial,credito_habilitado,credito_bcv_habilitado,ml_envio,limite_credito_usd,dias_credito FROM usuarios ORDER BY rol,nombre",
+            get_conn()
+        )
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+        st.subheader("Examinar cliente")
+        usuarios_exam = q("SELECT username,nombre FROM usuarios ORDER BY nombre", fetch=True)
+        if usuarios_exam:
+            opts_exam = {f"{u['nombre'] or u['username']} — {u['username']}": u["username"] for u in usuarios_exam}
+            sel_exam = st.selectbox("Seleccionar cliente / usuario", list(opts_exam.keys()), key="exam_cliente_select")
+            username_exam = opts_exam[sel_exam]
+            ped = pd.read_sql_query("SELECT * FROM pedidos WHERE username=? ORDER BY id DESC", get_conn(), params=(username_exam,))
+            cot = pd.read_sql_query("SELECT * FROM cotizaciones WHERE username=? ORDER BY id DESC", get_conn(), params=(username_exam,))
+            cre = pd.read_sql_query("SELECT * FROM creditos WHERE username=? ORDER BY id DESC", get_conn(), params=(username_exam,))
+            total_gastado = float(ped[ped["status"].astype(str).str.lower() != "cancelado"]["total_usd"].sum()) if not ped.empty else 0.0
+            total_pagado_final = float(ped[ped["status"].astype(str).str.contains("Finalizado|Pagado|Procesado|Confirmado", case=False, na=False)]["total_usd"].sum()) if not ped.empty else 0.0
+            saldo_credito = float(cre["saldo_usd"].sum()) if not cre.empty else 0.0
+
+            ultima_compra = ped["fecha"].max() if not ped.empty else "Sin compras"
+            promedio_compra = total_gastado / len(ped) if len(ped) else 0.0
+            k1, k2, k3, k4, k5 = st.columns(5)
+            k1.metric("Pedidos", len(ped))
+            k2.metric("Total pedidos", money_usd(total_gastado))
+            k3.metric("Compras finalizadas", money_usd(total_pagado_final))
+            k4.metric("Saldo crédito", money_usd(saldo_credito))
+            k5.metric("Promedio compra", money_usd(promedio_compra))
+            st.caption(f"Última compra / pedido: {ultima_compra}")
+
+            sub1, sub2, sub3, sub4 = st.tabs(["Pedidos", "Cotizaciones", "Créditos", "Productos frecuentes"])
+            with sub1:
+                if ped.empty:
+                    st.info("Sin pedidos.")
+                else:
+                    st.dataframe(ped[["id","fecha","cliente_nombre","tipo_pago","total_usd","status"]], use_container_width=True, hide_index=True)
+            with sub2:
+                if cot.empty:
+                    st.info("Sin cotizaciones.")
+                else:
+                    st.dataframe(cot[["id","fecha","cliente_nombre","total_usd","status"]], use_container_width=True, hide_index=True)
+            with sub3:
+                if cre.empty:
+                    st.info("Sin créditos.")
+                else:
+                    st.dataframe(cre[["id","pedido_id","fecha_inicio","fecha_vencimiento","monto_usd","saldo_usd","status"]], use_container_width=True, hide_index=True)
+            with sub4:
+                frecuentes = productos_mas_comprados_por_usuario(username_exam)
+                if not frecuentes:
+                    st.info("Sin productos frecuentes todavía.")
+                else:
+                    st.dataframe(pd.DataFrame(frecuentes).head(20), use_container_width=True, hide_index=True,
+                                 column_config={"Total USD": st.column_config.NumberColumn(format="$%.2f")})
+
+        st.subheader("Acciones administrativas")
+        usuarios = q("SELECT username,nombre FROM usuarios ORDER BY nombre", fetch=True)
+        if usuarios:
+            opts = {f"{u['nombre'] or u['username']} — {u['username']}": u["username"] for u in usuarios}
+            sel = st.selectbox("Usuario", list(opts.keys()), key="user_delete_select")
+            username_sel = opts[sel]
+            c1, c2 = st.columns(2)
+            confirmar = st.checkbox("Confirmar acción sobre este usuario")
+            if c1.button("🚫 Desactivar usuario", disabled=not confirmar, use_container_width=True):
+                q("UPDATE usuarios SET activo=0 WHERE username=?", (username_sel,))
+                st.warning("Usuario desactivado.")
+                st.rerun()
+            if c2.button("🗑️ Eliminar usuario", disabled=not confirmar, use_container_width=True):
+                relacionados = q("SELECT COUNT(*) AS n FROM pedidos WHERE username=?", (username_sel,), fetch=True)[0]["n"]
+                if relacionados:
+                    st.error("Este usuario tiene pedidos asociados. Desactívalo para conservar trazabilidad.")
+                elif username_sel == st.session_state.user["username"]:
+                    st.error("No puedes eliminar tu propio usuario activo.")
+                else:
+                    q("DELETE FROM usuarios WHERE username=?", (username_sel,))
+                    q("DELETE FROM carritos WHERE username=?", (username_sel,))
+                    st.success("Usuario eliminado.")
+                    st.rerun()
+
+    with tab2:
+        st.caption("Usa botones separados para crear o actualizar. Esto evita duplicar usuarios al editar correo o username.")
+        modo = st.radio("Acción", ["Crear usuario nuevo", "Actualizar usuario existente"], horizontal=True)
+
+        usuarios = q("SELECT username,nombre FROM usuarios ORDER BY nombre", fetch=True)
+        edit_row = None
+        username_original = ""
+
+        if modo == "Actualizar usuario existente":
+            if not usuarios:
+                st.info("No hay usuarios para editar.")
+                return
+            opciones = [f"{u['nombre'] or u['username']} — {u['username']}" for u in usuarios]
+            mapa = {f"{u['nombre'] or u['username']} — {u['username']}": u["username"] for u in usuarios}
+            sel_edit = st.selectbox("Seleccionar usuario para editar", opciones)
+            username_original = mapa[sel_edit]
+            edit_row = get_user(username_original)
+            if edit_row:
+                st.info(f"Editando usuario existente: {edit_row['nombre'] or edit_row['username']} · ID interno: {edit_row['id_usuario'] if 'id_usuario' in edit_row.keys() else 'N/A'}")
+        else:
+            st.info("Creando usuario nuevo. Si quieres cambiar datos de alguien existente, usa Actualizar usuario existente.")
+
+        with st.form("crear_editar_usuario_v43"):
+            c1, c2, c3 = st.columns(3)
+            username = c1.text_input("Usuario / login", value=edit_row["username"] if edit_row else "", help="Solo admin puede cambiarlo. Si cambia, se actualizarán pedidos, créditos, cotizaciones y carrito asociados.")
+            email = c2.text_input("Correo", value=(edit_row["email"] if edit_row and "email" in edit_row.keys() and edit_row["email"] else ""))
+            nombre = c3.text_input("Nombre / razón social", value=edit_row["nombre"] if edit_row else "")
+
+            rol_default = edit_row["rol"] if edit_row and edit_row["rol"] in ["comprador", "vendedor", "vendedor_mercadolibre", "admin"] else "comprador"
+            c4, c5, c6 = st.columns(3)
+            rol = c4.selectbox("Rol", ["comprador", "vendedor", "vendedor_mercadolibre", "admin"], index=["comprador","vendedor","vendedor_mercadolibre","admin"].index(rol_default))
+            telefono = c5.text_input("Teléfono", value=edit_row["telefono"] if edit_row else "")
+            rif = c6.text_input("RIF / CI", value=edit_row["rif"] if edit_row else "")
+
+            ciudad = st.text_input("Ciudad", value=edit_row["ciudad"] if edit_row else "")
+            direccion = st.text_area("Dirección", value=edit_row["direccion"] if edit_row else "")
+
+            c7, c8, c9, c10, c11, c12 = st.columns(6)
+            cliente_especial = c7.checkbox("Cliente especial", value=bool(edit_row["cliente_especial"]) if edit_row and "cliente_especial" in edit_row.keys() else False, help="Activa precios especiales en productos que los tengan configurados.")
+            credito_hab = c8.checkbox("Crédito habilitado", value=bool(edit_row["credito_habilitado"]) if edit_row else False)
+            credito_bcv_hab = c9.checkbox("Crédito BCV habilitado", value=bool(edit_row["credito_bcv_habilitado"]) if edit_row and "credito_bcv_habilitado" in edit_row.keys() else False, help="Permite que este cliente vea y use la modalidad Crédito BCV.")
+            ml_envio = c10.checkbox("ML / ENVÍO", value=bool(edit_row["ml_envio"]) if edit_row else False, help="Activa cálculo sugerido de envío por peso para clientes MercadoLibre o fuera del estado.")
+            limite = c11.number_input("Límite crédito USD", min_value=0.0, value=float(edit_row["limite_credito_usd"] if edit_row else 0), step=1.0)
+            dias = c12.number_input("Días crédito", min_value=1, max_value=90, value=int(edit_row["dias_credito"] if edit_row else parse_float(get_config("dias_credito_default","10"), 10)))
+            activo = st.checkbox("Activo", value=bool(edit_row["activo"]) if edit_row else True)
+            password = st.text_input("Contraseña nueva / inicial", type="password", help="Déjala vacía para conservar la actual si estás editando. En usuarios nuevos, si la dejas vacía será 1234.")
+
+            cbtn1, cbtn2 = st.columns(2)
+            submit_create = cbtn1.form_submit_button("➕ Crear usuario nuevo", type="primary", disabled=(modo != "Crear usuario nuevo"))
+            submit_update = cbtn2.form_submit_button("💾 Actualizar usuario existente", type="primary", disabled=(modo != "Actualizar usuario existente"))
+
+        if submit_create:
+            ok, msg = crear_usuario_admin(username, password, nombre, rol, telefono, rif, ciudad, direccion, email, cliente_especial, credito_hab, credito_bcv_hab, ml_envio, limite, dias, activo)
+            if ok:
+                set_feedback(msg, "success")
+                st.rerun()
+            else:
+                st.error(msg)
+
+        if submit_update:
+            ok, msg = actualizar_usuario_admin(username_original, username, nombre, rol, telefono, rif, ciudad, direccion, email, cliente_especial, credito_hab, credito_bcv_hab, ml_envio, limite, dias, activo, password)
+            if ok:
+                set_feedback(msg, "success")
+                st.rerun()
+            else:
+                st.error(msg)
+
+
+def admin_cotizaciones():
+    st.title("📄 Cotizaciones")
+    st.caption("Busca por número, cliente, fecha, estado o monto.")
+
+    bus = st.text_input("Buscar cotización", placeholder="Ejemplo: Papelería, 29/05/2026, Pendiente, #12")
+    df = pd.read_sql_query("SELECT id,fecha,cliente_nombre,cliente_rif,subtotal_usd,envio_usd,total_usd,total_bs_proveedor,status,peso_total_kg FROM cotizaciones ORDER BY id DESC", get_conn())
+
+    if bus and not df.empty:
+        b = bus.strip().lower().replace("#", "")
+        mask = (
+            df["id"].astype(str).str.contains(b, case=False, na=False) |
+            df["fecha"].astype(str).str.lower().str.contains(b, na=False) |
+            df["cliente_nombre"].astype(str).str.lower().str.contains(b, na=False) |
+            df["cliente_rif"].astype(str).str.lower().str.contains(b, na=False) |
+            df["status"].astype(str).str.lower().str.contains(b, na=False) |
+            df["total_usd"].astype(str).str.contains(b, case=False, na=False)
+        )
+        df = df[mask]
+
+    st.dataframe(df, use_container_width=True, hide_index=True)
+    if df.empty:
+        st.info("No hay cotizaciones que coincidan con la búsqueda.")
+        return
+
+    cot_ids = df["id"].astype(int).tolist()
+    cot_id = st.selectbox("Seleccionar cotización", cot_ids, format_func=lambda x: f"Cotización #{x}")
+    c1, c2 = st.columns(2)
+    if c1.button("📄 Generar PDF", use_container_width=True):
+        pdf = generar_pdf_cotizacion(int(cot_id))
+        if pdf:
+            st.download_button("⬇️ Descargar cotización PDF", data=pdf, file_name=f"cotizacion_{int(cot_id):04d}.pdf", mime="application/pdf", use_container_width=True)
+        else:
+            st.error("Cotización no encontrada.")
+
+    rows_status = q("SELECT status FROM cotizaciones WHERE id=?", (int(cot_id),), fetch=True)
+    estado_actual_cot = rows_status[0]["status"] if rows_status else "Pendiente"
+    estados_cot = ["Pendiente", "Enviada", "Aprobada", "Rechazada", "Convertida en pedido"]
+    c_estado1, c_estado2 = st.columns([1.2, 1])
+    nuevo_estado_cot = c_estado1.selectbox(
+        "Estado de cotización",
+        estados_cot,
+        index=estados_cot.index(estado_actual_cot) if estado_actual_cot in estados_cot else 0,
+        key=f"estado_cot_{cot_id}"
+    )
+    if c_estado2.button("💾 Guardar estado cotización", use_container_width=True):
+        q("UPDATE cotizaciones SET status=? WHERE id=?", (nuevo_estado_cot, int(cot_id)))
+        st.success("Estado de cotización actualizado.")
+        st.rerun()
+
+    c3, c4 = st.columns(2)
+    tipo_convertir = c3.radio("Convertir como", ["Contado", "Crédito"], horizontal=True, key=f"tipo_convertir_cot_{cot_id}")
+    if c4.button("➡️ Convertir cotización en pedido", use_container_width=True):
+        rows = q("SELECT * FROM cotizaciones WHERE id=?", (int(cot_id),), fetch=True)
+        if rows:
+            cot = rows[0]
+            fake_user = get_user(cot["username"]) or get_user(st.session_state.user["username"])
+            items = json.loads(cot["items"] or "{}")
+            tipo_pago = "credito" if tipo_convertir == "Crédito" else "contado"
+            pid, msg = crear_pedido_desde_carrito(fake_user, items, tipo_pago, "Por confirmar", cot["envio_usd"], f"Convertido desde cotización #{cot_id}")
+            if pid:
+                q("UPDATE cotizaciones SET status='Convertida en pedido' WHERE id=?", (int(cot_id),))
+                st.success(f"Cotización convertida en pedido #{pid}.")
+                st.rerun()
+            else:
+                st.error(msg)
+    confirmar = st.checkbox("Confirmar eliminación de cotización")
+    if c2.button("🗑️ Eliminar cotización", disabled=not confirmar, use_container_width=True):
+        eliminar_cotizacion(int(cot_id))
+        st.success("Cotización eliminada.")
+        st.rerun()
+
+
+def dashboard_admin():
+    st.title("📊 Dashboard Comercial")
+
+    pedidos = pd.read_sql_query("SELECT * FROM pedidos", get_conn())
+    creditos = pd.read_sql_query("SELECT * FROM creditos", get_conn())
+    abonos = pd.read_sql_query("SELECT * FROM abonos", get_conn())
+    productos = pd.read_sql_query("SELECT * FROM productos", get_conn())
+
+    pedidos_activos = pedidos[~pedidos["status"].astype(str).str.lower().isin(["cancelado", "anulado"])] if not pedidos.empty else pedidos
+    total_pedidos = float(pedidos_activos["total_usd"].sum()) if not pedidos_activos.empty else 0.0
+    saldo = float(creditos["saldo_usd"].sum()) if not creditos.empty else 0.0
+    pend = len(abonos[abonos["status"]=="Pendiente de validar"]) if not abonos.empty else 0
+    cot_pend = pd.read_sql_query("SELECT COUNT(*) AS n FROM cotizaciones WHERE status IN ('Pendiente','Enviada','Aprobada')", get_conn()).iloc[0]["n"]
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Pedidos activos", len(pedidos_activos))
+    c2.metric("Ventas/Pedidos USD", money_usd(total_pedidos))
+    c3.metric("Saldo créditos", money_usd(saldo))
+    c4.metric("Pagos por validar", pend)
+    c5.metric("Cotizaciones abiertas", int(cot_pend or 0))
+
+    tab1, tab2, tab3, tab4 = st.tabs(["Últimos pedidos", "Mejores clientes", "Productos/Categorías", "Alertas comerciales"])
+
+    with tab1:
+        if pedidos.empty:
+            st.info("Sin pedidos.")
+        else:
+            cols = ["id","fecha","cliente_nombre","tipo_pago","metodo_pago","total_usd","status","pos_procesado"]
+            st.dataframe(pedidos[cols].sort_values("id", ascending=False).head(25), use_container_width=True, hide_index=True)
+
+    with tab2:
+        if pedidos_activos.empty:
+            st.info("Sin ventas activas.")
+        else:
+            mejores = pedidos_activos.groupby(["username","cliente_nombre"], dropna=False).agg(
+                pedidos=("id","count"),
+                total_usd=("total_usd","sum"),
+                ultima_compra=("fecha","max")
+            ).reset_index().sort_values("total_usd", ascending=False)
+            st.dataframe(mejores.head(30), use_container_width=True, hide_index=True,
+                         column_config={"total_usd": st.column_config.NumberColumn(format="$%.2f")})
+
+    with tab3:
+        items = []
+        if not pedidos_activos.empty:
+            for _, p in pedidos_activos.iterrows():
+                for it in pedido_items_rows(p):
+                    items.append(it)
+        if not items:
+            st.info("Aún no hay productos vendidos para analizar.")
+        else:
+            df_items = pd.DataFrame(items)
+            prod_top = df_items.groupby(["SKU","Producto"], dropna=False).agg(
+                unidades=("Unidades","sum"),
+                total_usd=("Subtotal USD","sum"),
+                lineas=("SKU","count")
+            ).reset_index().sort_values("total_usd", ascending=False)
+            st.subheader("Productos más vendidos")
+            st.dataframe(prod_top.head(30), use_container_width=True, hide_index=True,
+                         column_config={"total_usd": st.column_config.NumberColumn(format="$%.2f")})
+
+            if not productos.empty:
+                cat_map = productos[["sku","categoria_id"]].copy()
+                cats = pd.read_sql_query("SELECT id,nombre FROM categorias", get_conn())
+                cat_map = cat_map.merge(cats, left_on="categoria_id", right_on="id", how="left")
+                df_cat = df_items.merge(cat_map, left_on="SKU", right_on="sku", how="left")
+                cat_top = df_cat.groupby("nombre", dropna=False).agg(
+                    unidades=("Unidades","sum"),
+                    total_usd=("Subtotal USD","sum"),
+                    lineas=("SKU","count")
+                ).reset_index().rename(columns={"nombre":"Categoría"}).sort_values("total_usd", ascending=False)
+                st.subheader("Categorías más vendidas")
+                st.dataframe(cat_top, use_container_width=True, hide_index=True,
+                             column_config={"total_usd": st.column_config.NumberColumn(format="$%.2f")})
+
+    with tab4:
+        alertas = productos_alertas_margen()
+        if not alertas:
+            st.success("No hay alertas comerciales relevantes.")
+        else:
+            df_alertas = pd.DataFrame(alertas)
+            a1, a2, a3 = st.columns(3)
+            a1.metric("Productos con alerta", len(df_alertas))
+            a2.metric("Sin costo proveedor", int(df_alertas["Alertas"].str.contains("Sin costo proveedor").sum()))
+            a3.metric("Margen bajo", int(df_alertas["Alertas"].str.contains("Margen").sum()))
+            st.dataframe(df_alertas, use_container_width=True, hide_index=True)
+
+
+def mis_pedidos():
+    st.title("🧾 Pedidos / Gestor de órdenes")
+    user = get_user(st.session_state.user["username"])
+    visibles = usuarios_visibles_para(user)
+    placeholders = ",".join(["?"]*len(visibles))
+    df = pd.read_sql_query(f"SELECT * FROM pedidos WHERE username IN ({placeholders}) ORDER BY id DESC", get_conn(), params=visibles)
+    if df.empty:
+        st.info("Sin pedidos.")
+        return
+
+    bus = st.text_input("Buscar pedido", placeholder="Cliente, número, fecha, estado, monto...")
+    estados_filtro = ["Todos"] + sorted([x for x in df["status"].dropna().astype(str).unique().tolist()])
+    colf1, colf2, colf3 = st.columns([2, 1.3, 1.3])
+    with colf1:
+        filtro_estado = st.selectbox("Estado", estados_filtro)
+    with colf2:
+        solo_credito = st.checkbox("Solo créditos")
+    with colf3:
+        solo_pos_pendiente = st.checkbox("Pendiente POS")
+
+    df_view = df.copy()
+    if bus:
+        b = bus.lower().replace("#", "")
+        mask = (
+            df_view["id"].astype(str).str.contains(b, na=False) |
+            df_view["fecha"].astype(str).str.lower().str.contains(b, na=False) |
+            df_view["cliente_nombre"].astype(str).str.lower().str.contains(b, na=False) |
+            df_view["status"].astype(str).str.lower().str.contains(b, na=False) |
+            df_view["total_usd"].astype(str).str.contains(b, na=False)
+        )
+        df_view = df_view[mask]
+    if filtro_estado != "Todos":
+        df_view = df_view[df_view["status"].astype(str) == filtro_estado]
+    if solo_credito:
+        df_view = df_view[df_view["tipo_pago"].astype(str).str.lower() == "credito"]
+    if solo_pos_pendiente and "pos_procesado" in df_view.columns:
+        df_view = df_view[df_view["pos_procesado"].fillna(0).astype(int) == 0]
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Pedidos filtrados", len(df_view))
+    k2.metric("Total filtrado", money_usd(df_view["total_usd"].sum() if not df_view.empty else 0))
+    k3.metric("Créditos", int((df_view["tipo_pago"].astype(str).str.lower()=="credito").sum()) if not df_view.empty else 0)
+    k4.metric("Pendiente POS", int((df_view["pos_procesado"].fillna(0).astype(int)==0).sum()) if "pos_procesado" in df_view.columns and not df_view.empty else 0)
+
+    resumen_cols = ["id","fecha","cliente_nombre","tipo_pago","total_usd","status"]
+    if "pos_procesado" in df_view.columns:
+        resumen_cols.append("pos_procesado")
+    st.dataframe(df_view[resumen_cols], use_container_width=True, hide_index=True,
+                 column_config={"total_usd": st.column_config.NumberColumn(format="$%.2f")})
+
+    st.markdown("---")
+    if df_view.empty:
+        st.info("No hay pedidos que coincidan con los filtros.")
+        return
+
+    pid = st.selectbox("Examinar pedido", df_view["id"].astype(int).tolist(), format_func=lambda x: f"Pedido #{x}")
+    rows = q("SELECT * FROM pedidos WHERE id=?", (int(pid),), fetch=True)
+    if not rows:
+        st.error("Pedido no encontrado.")
+        return
+    p = rows[0]
+
+    ctop1, ctop2, ctop3, ctop4 = st.columns(4)
+    ctop1.metric("Total", money_usd(p["total_usd"]))
+    ctop2.metric("Tipo", str(p["tipo_pago"]).upper())
+    ctop3.metric("Estado", p["status"])
+    ctop4.metric("POS", "Procesado" if int(p["pos_procesado"] or 0) else "Pendiente")
+
+    st.write(f"Cliente: **{p['cliente_nombre']}** · Fecha: **{p['fecha']}** · Método: **{p['metodo_pago'] or 'N/A'}**")
+    if p["notas"]:
+        st.info(p["notas"])
+
+    items_df = pd.DataFrame(pedido_items_rows(p))
+    if not items_df.empty:
+        st.subheader("Items del pedido")
+        st.dataframe(items_df, use_container_width=True, hide_index=True,
+                     column_config={"Subtotal USD": st.column_config.NumberColumn(format="$%.2f")})
+
+    estados = ["Pendiente", "Pendiente de pago/entrega", "Crédito pendiente", "Crédito parcial", "Pago por validar",
+               "Confirmado", "Preparando", "Listo para entregar", "Entregado", "Finalizado / Pagado",
+               "Procesado en POS", "Cancelado", "Anulado"]
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        pdf = generar_pdf_pedido(int(pid))
+        st.download_button("📄 Descargar PDF", data=pdf, file_name=f"pedido_{int(pid):04d}.pdf", mime="application/pdf", use_container_width=True)
+
+    if user["rol"] == "admin":
+        with c2:
+            idx = estados.index(p["status"]) if p["status"] in estados else 0
+            nuevo = st.selectbox("Cambiar estado", estados, index=idx, key=f"estado_pedido_manager_{pid}")
+            if st.button("Guardar estado", use_container_width=True, key=f"save_estado_ped_{pid}"):
+                if nuevo in ["Cancelado", "Anulado"]:
+                    ok, msg = anular_credito_de_pedido(int(pid), f"Pedido cambiado a {nuevo} por admin")
+                    if ok:
+                        q("UPDATE pedidos SET status=? WHERE id=?", (nuevo, int(pid)))
+                    st.success(msg) if ok else st.error(msg)
+                elif nuevo == "Finalizado / Pagado" and p["credito_id"]:
+                    ok, msg = marcar_credito_pagado(int(p["credito_id"]), st.session_state.user["username"])
+                    st.success(msg) if ok else st.error(msg)
+                else:
+                    q("UPDATE pedidos SET status=? WHERE id=?", (nuevo, int(pid)))
+                    st.success("Estado actualizado.")
+                st.rerun()
+
+        with c3:
+            confirmar = st.checkbox("Confirmar eliminación", key=f"confirm_del_pedido_{pid}")
+            if st.button("🗑️ Eliminar pedido", key=f"del_pedido_{pid}", disabled=not confirmar, use_container_width=True):
+                ok, msg = eliminar_pedido_seguro(int(pid))
+                if ok:
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
+
+        st.markdown("---")
+        st.subheader("Asignar / transferir pedido")
+        usuarios_dest = q("SELECT username,nombre FROM usuarios WHERE activo=1 ORDER BY nombre,username", fetch=True)
+        if usuarios_dest:
+            opts_dest = {f"{u['nombre'] or u['username']} — {u['username']}": u["username"] for u in usuarios_dest}
+            sel_dest = st.selectbox("Cliente destino", list(opts_dest.keys()), key=f"transfer_cliente_{pid}")
+            confirmar_transfer = st.checkbox("Confirmar transferencia de este pedido", key=f"confirm_transfer_{pid}")
+            if st.button("🔁 Transferir pedido a cliente", disabled=not confirmar_transfer, use_container_width=True, key=f"btn_transfer_pedido_{pid}"):
+                ok, msg = transferir_pedido_a_cliente(int(pid), opts_dest[sel_dest])
+                st.success(msg) if ok else st.error(msg)
+                if ok:
+                    st.rerun()
+
+        st.markdown("---")
+        st.subheader("Editar pedido")
+        if not pedido_permite_edicion(p):
+            st.warning("Este pedido no puede editarse por su estado actual. Para editarlo, primero cámbialo a un estado pendiente si corresponde.")
+        else:
+            abonos_validados = q("SELECT COUNT(*) AS n FROM abonos WHERE pedido_id=? AND status='Validado'", (int(pid),), fetch=True)[0]["n"]
+            if abonos_validados:
+                st.warning("Este pedido tiene abonos validados. El sistema no permitirá que el nuevo total quede por debajo de lo abonado.")
+
+            items = json.loads(p["items"] or "{}")
+            items_edit = {}
+            with st.form(f"form_editar_pedido_{pid}"):
+                st.caption("Puedes quitar líneas o ajustar cantidades. Al guardar se recalculan totales y crédito asociado si aplica.")
+                for k, item in items.items():
+                    st.markdown(f"**{item.get('desc','Item')}**")
+                    c_qty, c_keep = st.columns([1, 1])
+                    qty = c_qty.number_input(
+                        f"Cantidad ({presentacion_display_item(item)})",
+                        min_value=0,
+                        max_value=9999,
+                        value=int(item.get("cantidad_presentacion", 1)),
+                        step=1,
+                        key=f"edit_qty_{pid}_{k}"
+                    )
+                    keep = c_keep.checkbox("Mantener item", value=True, key=f"edit_keep_{pid}_{k}")
+                    nuevo_item = dict(item)
+                    nuevo_item["cantidad_presentacion"] = int(qty)
+                    if keep and int(qty) > 0:
+                        items_edit[k] = nuevo_item
+
+                cenv, cmet = st.columns(2)
+                envio_edit = cenv.number_input("Envío USD", min_value=0.0, value=float(p["envio_usd"] or 0), step=0.5)
+                metodo_edit = cmet.selectbox(
+                    "Método de pago",
+                    ["Por confirmar", "Divisas", "Transferencia", "Pago móvil", "Zelle", "Zinli", "Binance", "Otro"],
+                    index=(["Por confirmar", "Divisas", "Transferencia", "Pago móvil", "Zelle", "Zinli", "Binance", "Otro"].index(p["metodo_pago"]) if p["metodo_pago"] in ["Por confirmar", "Divisas", "Transferencia", "Pago móvil", "Zelle", "Zinli", "Binance", "Otro"] else 0)
+                )
+                notas_edit = st.text_area("Notas", value=p["notas"] or "")
+                submit_edit = st.form_submit_button("💾 Guardar cambios y recalcular", type="primary")
+
+            if submit_edit:
+                ok, msg = recalcular_pedido_y_credito(int(pid), items_edit, envio_edit, metodo_pago=metodo_edit, notas=notas_edit)
+                st.success(msg) if ok else st.error(msg)
+                if ok:
+                    st.rerun()
+
+
+def mis_creditos():
+    st.title("💳 Mis créditos")
+    user = get_user(st.session_state.user["username"])
+    visibles = usuarios_visibles_para(user)
+    placeholders = ",".join(["?"]*len(visibles))
+    df = pd.read_sql_query(f"SELECT * FROM creditos WHERE username IN ({placeholders}) ORDER BY id DESC", get_conn(), params=visibles)
+    tasa_bcv = get_tasa_bcv()
+    tasa_prov = get_tasa_proveedor()
+
+    if df.empty:
+        st.info("Sin créditos registrados.")
+    else:
+        filas = []
+        for _, cr in df.iterrows():
+            tipo = str(cr.get("tipo_credito") or "usd").lower()
+            saldo = float(cr.get("saldo_bcv") or cr.get("saldo_usd") or 0) if tipo == "bcv" else float(cr.get("saldo_usd") or 0)
+            monto = float(cr.get("monto_bcv") or cr.get("monto_usd") or 0) if tipo == "bcv" else float(cr.get("monto_usd") or 0)
+            bs_hoy = saldo * (tasa_bcv if tipo == "bcv" else tasa_prov)
+            filas.append({
+                "id": int(cr["id"]),
+                "pedido_id": int(cr["pedido_id"]),
+                "cliente_nombre": cr["cliente_nombre"],
+                "tipo": "BCV" if tipo == "bcv" else "Divisas",
+                "monto": f"{money_usd(monto)} BCV" if tipo == "bcv" else money_usd(monto),
+                "saldo": f"{money_usd(saldo)} BCV" if tipo == "bcv" else money_usd(saldo),
+                "Bs a pagar hoy": money_bs(bs_hoy),
+                "status": cr["status"]
+            })
+        st.dataframe(pd.DataFrame(filas), use_container_width=True, hide_index=True)
+
+    if user["rol"] != "admin":
+        creditos_pend = q("SELECT * FROM creditos WHERE username=? AND COALESCE(saldo_usd,0)>0 ORDER BY id DESC", (user["username"],), fetch=True)
+    else:
+        creditos_pend = q("SELECT * FROM creditos WHERE COALESCE(saldo_usd,0)>0 ORDER BY id DESC", fetch=True)
+
+    if creditos_pend:
+        st.subheader("Cargar pago / abono")
+        def opt_label(c):
+            tipo = str(c["tipo_credito"] if "tipo_credito" in c.keys() and c["tipo_credito"] else "usd").lower()
+            saldo_txt = f"{money_usd(c['saldo_bcv'] or c['saldo_usd'])} BCV" if tipo == "bcv" else money_usd(c["saldo_usd"])
+            return f"Crédito #{c['id']} - {c['cliente_nombre']} - saldo {saldo_txt}"
+        opts = {opt_label(c): c for c in creditos_pend}
+        sel = st.selectbox("Crédito", list(opts.keys()))
+        cr = opts[sel]
+        tipo = str(cr["tipo_credito"] if "tipo_credito" in cr.keys() and cr["tipo_credito"] else "usd").lower()
+
+        with st.form("form_abono"):
+            if tipo == "bcv":
+                saldo_bcv = float(cr["saldo_bcv"] or cr["saldo_usd"] or 0)
+                monto_bcv = st.number_input("Monto a pagar en $ BCV", min_value=0.01, max_value=saldo_bcv, value=min(10.0, saldo_bcv), step=0.01)
+                tasa_actual = get_tasa_bcv()
+                monto_bs = monto_bcv * tasa_actual
+                st.info(f"Tasa BCV actual: {tasa_actual:,.2f}. Debes transferir: {money_bs(monto_bs)}")
+                metodo = st.text_input("Método de pago", value="Pago móvil / transferencia")
+                ref = st.text_input("Referencia")
+                comp = st.file_uploader("Comprobante", type=["jpg","jpeg","png","webp","pdf"])
+                notas = st.text_area("Notas")
+                submit = st.form_submit_button("Enviar pago BCV para validar", type="primary")
+            else:
+                monto = st.number_input("Monto USD real", min_value=0.01, max_value=float(cr["saldo_usd"] or 0), value=min(10.0, float(cr["saldo_usd"] or 0)), step=0.01)
+                tasa_actual = get_tasa_proveedor()
+                monto_bs = monto * tasa_actual
+                st.info(f"Tasa proveedor actual: {tasa_actual:,.2f}. Referencia en Bs: {money_bs(monto_bs)}")
+                metodo = st.text_input("Método de pago", value="Pago móvil / transferencia / divisas")
+                ref = st.text_input("Referencia")
+                comp = st.file_uploader("Comprobante", type=["jpg","jpeg","png","webp","pdf"])
+                notas = st.text_area("Notas")
+                submit = st.form_submit_button("Enviar pago para validar", type="primary")
+
+        if submit:
+            path = save_uploaded_file(comp, PAGOS_DIR, prefix=f"abono_credito_{cr['id']}")
+            if tipo == "bcv":
+                tasa_actual = get_tasa_bcv()
+                monto_bcv = float(monto_bcv)
+                monto_bs = monto_bcv * tasa_actual
+                q("""INSERT INTO abonos
+                     (credito_id,pedido_id,username,fecha,monto_usd,monto_bs,metodo,referencia,comprobante_path,status,notas,
+                      tipo_credito,monto_bcv,tasa_bcv,monto_bs_esperado)
+                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                  (cr["id"], cr["pedido_id"], cr["username"], now(), monto_bcv, monto_bs, metodo, ref, path, "Pendiente de validar", notas,
+                   "bcv", monto_bcv, tasa_actual, monto_bs))
+            else:
+                tasa_actual = get_tasa_proveedor()
+                q("""INSERT INTO abonos
+                     (credito_id,pedido_id,username,fecha,monto_usd,monto_bs,metodo,referencia,comprobante_path,status,notas,
+                      tipo_credito,monto_bcv,tasa_bcv,monto_bs_esperado)
+                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                  (cr["id"], cr["pedido_id"], cr["username"], now(), monto, monto*tasa_actual, metodo, ref, path, "Pendiente de validar", notas,
+                   "usd", 0, get_tasa_bcv(), monto*tasa_actual))
+            st.success("Pago cargado. Queda pendiente de validación.")
+            st.rerun()
+
+    if st.button("📄 Descargar estado de cuenta", use_container_width=True):
+        pdf = generar_pdf_estado_cuenta(user["username"])
+        st.download_button("⬇️ Estado de cuenta PDF", data=pdf, file_name=f"estado_cuenta_{user['username']}.pdf", mime="application/pdf", use_container_width=True)
+
+def validar_creditos():
+    st.title("✅ Validar créditos / pagos")
+    tab1, tab2 = st.tabs(["Créditos", "Abonos por validar"])
+
+    with tab1:
+        creditos = pd.read_sql_query("SELECT * FROM creditos ORDER BY id DESC", get_conn())
+        if creditos.empty:
+            st.info("No hay créditos.")
+        else:
+            for _, cr in creditos.iterrows():
+                cid = int(cr["id"])
+                tipo_cr_txt = "BCV" if str(cr.get("tipo_credito") or "usd").lower() == "bcv" else "Divisas"
+                saldo_cr_txt = f"{money_usd(cr.get('saldo_bcv') or cr.get('saldo_usd') or 0)} BCV" if tipo_cr_txt == "BCV" else money_usd(cr["saldo_usd"])
+                with st.expander(f"Crédito #{cid} | {cr['cliente_nombre']} | {tipo_cr_txt} | Saldo {saldo_cr_txt} | {cr['status']}"):
+                    c1, c2, c3 = st.columns(3)
+                    c1.write(f"Pedido: #{cr['pedido_id']}")
+                    c2.write(f"Monto: {money_usd(cr.get('monto_bcv') or cr.get('monto_usd') or 0)} BCV" if tipo_cr_txt == "BCV" else f"Monto: {money_usd(cr['monto_usd'])}")
+                    c3.write(f"Vence: {cr['fecha_vencimiento']}")
+                    estados = ["Pendiente", "Parcial", "Pagado", "Vencido", "Anulado"]
+                    idx = estados.index(cr["status"]) if cr["status"] in estados else 0
+                    nuevo = st.selectbox("Estado crédito", estados, index=idx, key=f"estado_credito_{cid}")
+                    if nuevo != cr["status"]:
+                        if nuevo == "Pagado":
+                            ok, msg = marcar_credito_pagado(cid, st.session_state.user["username"])
+                            st.success(msg) if ok else st.error(msg)
+                        elif nuevo == "Anulado":
+                            q("UPDATE creditos SET saldo_usd=0,status='Anulado' WHERE id=?", (cid,))
+                            q("UPDATE pedidos SET status='Cancelado' WHERE id=?", (int(cr["pedido_id"]),))
+                            st.warning("Crédito anulado y pedido marcado como Cancelado.")
+                        else:
+                            q("UPDATE creditos SET status=? WHERE id=?", (nuevo, cid))
+                            st.success("Estado del crédito actualizado.")
+                        st.rerun()
+
+                    ab = pd.read_sql_query("SELECT * FROM abonos WHERE credito_id=? ORDER BY id DESC", get_conn(), params=(cid,))
+                    if not ab.empty:
+                        st.dataframe(ab[["id","fecha","tipo_credito","monto_usd","monto_bcv","tasa_bcv","monto_bs","metodo","referencia","status"]], use_container_width=True, hide_index=True)
+                    else:
+                        st.dataframe(ab, use_container_width=True, hide_index=True)
+
+                    confirmar = st.checkbox("Confirmar eliminación de este crédito y sus abonos", key=f"confirm_del_credito_{cid}")
+                    if st.button("🗑️ Eliminar crédito", key=f"del_credito_{cid}", disabled=not confirmar, use_container_width=True):
+                        ok, msg = eliminar_credito_y_abonos(cid)
+                        if ok:
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+
+    with tab2:
+        df = pd.read_sql_query("SELECT * FROM abonos WHERE status='Pendiente de validar' ORDER BY id DESC", get_conn())
+        if df.empty:
+            st.success("No hay abonos pendientes.")
+            return
+        st.dataframe(df[["id","credito_id","pedido_id","username","fecha","tipo_credito","monto_usd","monto_bcv","tasa_bcv","monto_bs","metodo","referencia","status"]], use_container_width=True, hide_index=True)
+        abono_id = st.number_input("ID abono", min_value=1, value=int(df.iloc[0]["id"]))
+        rows = q("SELECT * FROM abonos WHERE id=?", (int(abono_id),), fetch=True)
+        if rows:
+            ab = rows[0]
+            if ab["comprobante_path"]:
+                st.caption(f"Comprobante: {ab['comprobante_path']}")
+            c1, c2, c3 = st.columns(3)
+            if c1.button("✅ Validar abono", type="primary", use_container_width=True):
+                ok, msg = aplicar_abono_validado(int(abono_id), st.session_state.user["username"])
+                st.success(msg) if ok else st.warning(msg)
+                st.rerun()
+            if c2.button("❌ Rechazar abono", use_container_width=True):
+                q("UPDATE abonos SET status='Rechazado', validado_por=?, fecha_validacion=? WHERE id=?",
+                  (st.session_state.user["username"], now(), int(abono_id)))
+                st.warning("Abono rechazado.")
+                st.rerun()
+            confirmar_ab = st.checkbox("Confirmar eliminación de abono", key=f"confirm_del_abono_{abono_id}")
+            if c3.button("🗑️ Eliminar abono", disabled=not confirmar_ab, use_container_width=True):
+                q("DELETE FROM abonos WHERE id=?", (int(abono_id),))
+                st.success("Abono eliminado.")
+                st.rerun()
+
+
+def reportes():
+    st.title("📈 Reportes")
+
+    tab1, tab2, tab3, tab4 = st.tabs(["Resumen general", "Valor de inventario", "Alertas comerciales", "Exportar Excel"])
+
+    pedidos = pd.read_sql_query("SELECT * FROM pedidos ORDER BY id DESC", get_conn())
+    creditos = pd.read_sql_query("SELECT * FROM creditos ORDER BY id DESC", get_conn())
+    abonos = pd.read_sql_query("SELECT * FROM abonos ORDER BY id DESC", get_conn())
+    productos = pd.read_sql_query("SELECT * FROM productos ORDER BY descripcion", get_conn())
+
+    with tab1:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Pedidos USD", money_usd(pedidos["total_usd"].sum() if not pedidos.empty else 0))
+        c2.metric("Créditos saldo", money_usd(creditos["saldo_usd"].sum() if not creditos.empty else 0))
+        c3.metric("Abonos validados", money_usd(abonos[abonos["status"]=="Validado"]["monto_usd"].sum() if not abonos.empty else 0))
+        st.subheader("Últimos pedidos")
+        if pedidos.empty:
+            st.info("Sin pedidos.")
+        else:
+            st.dataframe(pedidos[["id","fecha","cliente_nombre","tipo_pago","total_usd","status"]].head(20), use_container_width=True, hide_index=True)
+
+        st.subheader("Mejores clientes")
+        if pedidos.empty:
+            st.info("Sin datos de clientes.")
+        else:
+            p_ok = pedidos[~pedidos["status"].astype(str).str.lower().isin(["cancelado", "anulado"])]
+            if p_ok.empty:
+                st.info("Sin ventas activas.")
+            else:
+                mejores = p_ok.groupby(["username","cliente_nombre"], dropna=False).agg(
+                    pedidos=("id","count"),
+                    total_usd=("total_usd","sum")
+                ).reset_index().sort_values("total_usd", ascending=False)
+                st.dataframe(mejores.head(20), use_container_width=True, hide_index=True)
+
+    with tab2:
+        st.subheader("📦 Valor total de inventario")
+        st.caption("Calculado con stock de WooCommerce + costos internos cargados en cada producto.")
+
+        ctop1, ctop2, ctop3 = st.columns([1.3, 1.2, 1.2])
+        solo_activos = ctop1.checkbox("Solo productos activos", value=True)
+        solo_stock = ctop2.checkbox("Solo con stock", value=True)
+        if ctop3.button("🔄 Sincronizar stock", type="primary", use_container_width=True):
+            with st.spinner("Sincronizando WooCommerce..."):
+                ok, no, errors = sync_todos_productos()
+            st.success(f"Sincronizados: {ok}. No sincronizados: {no}.")
+            if errors:
+                st.warning("Algunos errores:")
+                st.code("\\n".join(errors))
+            st.rerun()
+
+        rows = q("""SELECT p.*, c.nombre AS categoria
+                    FROM productos p LEFT JOIN categorias c ON p.categoria_id=c.id
+                    ORDER BY c.nombre, p.descripcion""", fetch=True)
+
+        data = []
+        for p in rows:
+            if solo_activos and int(p["activo"] or 0) != 1:
+                continue
+            val = calcular_valor_inventario_producto(p)
+            if solo_stock and val["stock"] <= 0:
+                continue
+            data.append({
+                "Categoría": p["categoria"] or "Sin categoría",
+                "SKU": p["sku"],
+                "Descripción": p["descripcion"],
+                "Stock": val["stock"],
+                "Bultos": val["bultos_disp"],
+                "Resto": val["resto"],
+                "Costo real c/u": val["costo_real_unitario"],
+                "Valor costo": val["valor_costo"],
+                "Valor venta unidad": val["valor_venta_unidad"],
+                "Ganancia unidad": val["gan_unidad"],
+                "Valor venta docena c/u": val["valor_venta_docena"],
+                "Ganancia docena": val["gan_docena"],
+                "Valor venta bulto c/u": val["valor_venta_bulto"],
+                "Ganancia bulto": val["gan_bulto"],
+            })
+
+        df_inv = pd.DataFrame(data)
+        if df_inv.empty:
+            st.info("No hay inventario para valorar según los filtros.")
+            return
+
+        total_costo = float(df_inv["Valor costo"].sum())
+        total_venta_unidad = float(df_inv["Valor venta unidad"].sum())
+        total_venta_docena = float(df_inv["Valor venta docena c/u"].sum())
+        total_venta_bulto = float(df_inv["Valor venta bulto c/u"].sum())
+        total_gan_unidad = float(df_inv["Ganancia unidad"].sum())
+        total_gan_docena = float(df_inv["Ganancia docena"].sum())
+        total_gan_bulto = float(df_inv["Ganancia bulto"].sum())
+
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Valor inventario costo", money_usd(total_costo))
+        k2.metric("Venta potencial unidad", money_usd(total_venta_unidad), delta=money_usd(total_gan_unidad))
+        k3.metric("Venta potencial docena", money_usd(total_venta_docena), delta=money_usd(total_gan_docena))
+        k4.metric("Venta potencial bulto", money_usd(total_venta_bulto), delta=money_usd(total_gan_bulto))
+
+        st.markdown("### Lectura rápida")
+        st.write(f"Ganancia estimada vendiendo todo a **unidad**: **{money_usd(total_gan_unidad)}**.")
+        st.write(f"Ganancia estimada vendiendo todo a **docena c/u**: **{money_usd(total_gan_docena)}**.")
+        st.write(f"Ganancia estimada vendiendo todo a **bulto c/u**: **{money_usd(total_gan_bulto)}**.")
+
+        bus = st.text_input("Buscar dentro del inventario", placeholder="SKU, descripción o categoría")
+        df_show = df_inv
+        if bus:
+            b = bus.lower()
+            df_show = df_inv[
+                df_inv["SKU"].astype(str).str.lower().str.contains(b) |
+                df_inv["Descripción"].astype(str).str.lower().str.contains(b) |
+                df_inv["Categoría"].astype(str).str.lower().str.contains(b)
+            ]
+
+        st.dataframe(
+            df_show,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Costo real c/u": st.column_config.NumberColumn(format="$%.2f"),
+                "Valor costo": st.column_config.NumberColumn(format="$%.2f"),
+                "Valor venta unidad": st.column_config.NumberColumn(format="$%.2f"),
+                "Ganancia unidad": st.column_config.NumberColumn(format="$%.2f"),
+                "Valor venta docena c/u": st.column_config.NumberColumn(format="$%.2f"),
+                "Ganancia docena": st.column_config.NumberColumn(format="$%.2f"),
+                "Valor venta bulto c/u": st.column_config.NumberColumn(format="$%.2f"),
+                "Ganancia bulto": st.column_config.NumberColumn(format="$%.2f"),
+            }
+        )
+
+        st.download_button(
+            "⬇️ Descargar inventario valorado CSV",
+            data=df_inv.to_csv(index=False).encode("utf-8-sig"),
+            file_name="valor_inventario.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+    with tab3:
+        st.subheader("Alertas comerciales de productos")
+        alertas = productos_alertas_margen()
+        if not alertas:
+            st.success("No hay alertas comerciales relevantes.")
+        else:
+            df_alertas = pd.DataFrame(alertas)
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Productos con alerta", len(df_alertas))
+            c2.metric("Sin costo proveedor", int(df_alertas["Alertas"].str.contains("Sin costo proveedor").sum()))
+            c3.metric("Margen bajo", int(df_alertas["Alertas"].str.contains("Margen").sum()))
+            filtro_alerta = st.text_input("Buscar alerta", placeholder="SKU, producto, categoría o tipo de alerta")
+            df_show = df_alertas
+            if filtro_alerta:
+                b = filtro_alerta.lower()
+                df_show = df_alertas[
+                    df_alertas["SKU"].astype(str).str.lower().str.contains(b) |
+                    df_alertas["Producto"].astype(str).str.lower().str.contains(b) |
+                    df_alertas["Categoría"].astype(str).str.lower().str.contains(b) |
+                    df_alertas["Alertas"].astype(str).str.lower().str.contains(b)
+                ]
+            st.dataframe(df_show, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Descargar alertas CSV",
+                data=df_alertas.to_csv(index=False).encode("utf-8-sig"),
+                file_name="alertas_comerciales_productos.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+    with tab4:
+        st.subheader("Exportar reporte completo")
+        rows = q("""SELECT p.*, c.nombre AS categoria
+                    FROM productos p LEFT JOIN categorias c ON p.categoria_id=c.id
+                    ORDER BY c.nombre, p.descripcion""", fetch=True)
+        inv_rows = []
+        for p in rows:
+            val = calcular_valor_inventario_producto(p)
+            inv_rows.append({
+                "Categoria": p["categoria"] or "Sin categoría",
+                "SKU": p["sku"],
+                "Descripcion": p["descripcion"],
+                "Stock": val["stock"],
+                "Bultos": val["bultos_disp"],
+                "Resto": val["resto"],
+                "Costo real c/u": val["costo_real_unitario"],
+                "Valor costo": val["valor_costo"],
+                "Valor venta unidad": val["valor_venta_unidad"],
+                "Ganancia unidad": val["gan_unidad"],
+                "Valor venta docena c/u": val["valor_venta_docena"],
+                "Ganancia docena": val["gan_docena"],
+                "Valor venta bulto c/u": val["valor_venta_bulto"],
+                "Ganancia bulto": val["gan_bulto"],
+            })
+        inventario_valorado = pd.DataFrame(inv_rows)
+
+        with BytesIO() as output:
+            with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                pedidos.to_excel(writer, sheet_name="Pedidos", index=False)
+                creditos.to_excel(writer, sheet_name="Creditos", index=False)
+                abonos.to_excel(writer, sheet_name="Abonos", index=False)
+                productos.to_excel(writer, sheet_name="Productos", index=False)
+                inventario_valorado.to_excel(writer, sheet_name="Inventario valorado", index=False)
+            st.download_button(
+                "⬇️ Descargar reporte Excel",
+                data=output.getvalue(),
+                file_name="reporte_insumos_mayor.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+
+
+def respaldo():
+    st.title("💾 Respaldo")
+    st.info("Para respaldar en Google Drive, usa una carpeta local sincronizada con Google Drive para escritorio. Ejemplo: C:\\Users\\Rene\\Google Drive\\Backups\\InsumosMayor")
+
+    tab1, tab2, tab3 = st.tabs(["Configuración", "Exportar manual", "Importar respaldo"])
+
+    with tab1:
+        folder = st.text_input("Carpeta destino de respaldo automático/manual", value=get_config("backup_folder", str(BACKUP_DIR)))
+        auto = st.checkbox("Hacer respaldo automático diario al abrir/usar el sistema", value=get_config("backup_auto_diario", "1") == "1")
+        if st.button("💾 Guardar configuración de respaldo"):
+            set_config("backup_folder", folder)
+            set_config("backup_auto_diario", "1" if auto else "0")
+            st.success("Configuración guardada.")
+        st.caption(f"Último respaldo automático: {get_config('backup_ultima_fecha','Nunca')}")
+
+    with tab2:
+        st.subheader("Exportar manual")
+        st.write("Genera un respaldo completo en JSON y una copia de la base de datos `.db`.")
+        folder_manual = st.text_input("Carpeta destino", value=get_config("backup_folder", str(BACKUP_DIR)), key="folder_manual_backup")
+        c1, c2 = st.columns(2)
+
+        if c1.button("📦 Crear respaldo en carpeta", type="primary", use_container_width=True):
+            try:
+                json_path, db_path = crear_respaldo(folder_manual)
+                st.success("Respaldo creado.")
+                st.write(json_path)
+                if db_path:
+                    st.write(db_path)
+            except Exception as e:
+                st.error(f"No se pudo respaldar: {e}")
+
+        if c2.button("⬇️ Preparar JSON para descargar", use_container_width=True):
+            try:
+                content, filename = exportar_json_actual()
+                st.download_button("Descargar respaldo JSON", data=content, file_name=filename, mime="application/json", use_container_width=True)
+            except Exception as e:
+                st.error(f"No se pudo exportar: {e}")
+
+    with tab3:
+        st.subheader("Importar respaldo")
+        st.warning("Antes de importar, crea un respaldo actual. La importación puede modificar productos, categorías, usuarios, pedidos, créditos y abonos.")
+        uploaded = st.file_uploader("Seleccionar respaldo .json", type=["json"])
+        modo = st.radio(
+            "Modo de importación",
+            ["fusionar", "reemplazar"],
+            horizontal=True,
+            help="Fusionar actualiza/agrega registros. Reemplazar limpia tablas comerciales antes de importar."
+        )
+        confirmar = st.checkbox("Confirmo que deseo importar este respaldo")
+        if st.button("📥 Importar respaldo JSON", type="primary", use_container_width=True):
+            if not confirmar:
+                st.error("Marca la confirmación antes de importar.")
+            elif uploaded is None:
+                st.error("Selecciona un archivo JSON.")
+            else:
+                try:
+                    ok, msg = importar_respaldo_json(uploaded, modo=modo)
+                    if ok:
+                        st.success(msg)
+                        st.info("Recarga la aplicación para ver todos los cambios reflejados.")
+                    else:
+                        st.error(msg)
+                except Exception as e:
+                    st.error(f"No se pudo importar: {e}")
+
+
+
+def control_pos():
+    st.title("🧾 Control POS")
+    st.caption("Control interno para marcar qué pedidos ya fueron sacados/procesados en el sistema POS.")
+
+    tab1, tab2 = st.tabs(["Pendientes por procesar en POS", "Procesados en POS"])
+
+    with tab1:
+        df = pd.read_sql_query("""SELECT id,fecha,cliente_nombre,tipo_pago,metodo_pago,total_usd,status,pos_procesado
+                                  FROM pedidos
+                                  WHERE COALESCE(pos_procesado,0)=0
+                                  AND status NOT IN ('Cancelado','Anulado')
+                                  ORDER BY id DESC""", get_conn())
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        if not df.empty:
+            pid = st.selectbox("Seleccionar pedido pendiente", df["id"].astype(int).tolist(), format_func=lambda x: f"Pedido #{x}")
+            rows = q("SELECT * FROM pedidos WHERE id=?", (int(pid),), fetch=True)
+            if rows:
+                ped = rows[0]
+                st.write(f"Cliente: **{ped['cliente_nombre']}**")
+                st.write(f"Total: **{money_usd(ped['total_usd'])}**")
+                confirmar = st.checkbox("Confirmo que este pedido ya fue sacado/procesado en el POS")
+                notas = st.text_area("Notas POS", key=f"notas_pos_{pid}")
+                if st.button("✅ Marcar como procesado en POS", type="primary", disabled=not confirmar, use_container_width=True):
+                    q("""UPDATE pedidos SET pos_procesado=1, pos_fecha=?, pos_usuario=?, pos_notas=?, status='Procesado en POS' WHERE id=?""",
+                      (now(), st.session_state.user["username"], notas, int(pid)))
+                    st.success("Pedido marcado como procesado en POS.")
+                    st.rerun()
+
+    with tab2:
+        df2 = pd.read_sql_query("""SELECT id,fecha,cliente_nombre,total_usd,status,pos_fecha,pos_usuario,pos_notas
+                                   FROM pedidos
+                                   WHERE COALESCE(pos_procesado,0)=1
+                                   ORDER BY pos_fecha DESC""", get_conn())
+        st.dataframe(df2, use_container_width=True, hide_index=True)
+        if not df2.empty:
+            pid2 = st.selectbox("Seleccionar procesado", df2["id"].astype(int).tolist(), format_func=lambda x: f"Pedido #{x}", key="pos_proc")
+            confirmar2 = st.checkbox("Confirmar reverso POS")
+            if st.button("↩️ Marcar como pendiente en POS", disabled=not confirmar2, use_container_width=True):
+                q("UPDATE pedidos SET pos_procesado=0, pos_fecha=NULL, pos_usuario=NULL, pos_notas=NULL, status='Confirmado' WHERE id=?", (int(pid2),))
+                st.warning("Pedido devuelto a pendiente POS.")
+                st.rerun()
+
+
+
+def rentabilidad_productos():
+    st.title("💰 Rentabilidad de Productos")
+    st.caption("La rentabilidad real se calcula automáticamente según precio de venta y costo real. El % funciona como margen objetivo para sugerir precios.")
+
+    productos = q("""SELECT p.*, c.nombre AS categoria FROM productos p
+                     LEFT JOIN categorias c ON p.categoria_id=c.id
+                     ORDER BY p.descripcion""", fetch=True)
+    if not productos:
+        st.info("No hay productos creados.")
+        return
+
+    cat_names = ["Todas"] + sorted(list({str(p["categoria"] or "Sin categoría") for p in productos}))
+    col_cat, col_bus = st.columns([1.4, 2.4])
+
+    with col_cat:
+        cat_sel = st.selectbox("Filtrar por categoría", cat_names)
+
+    with col_bus:
+        bus = st.text_input("Buscar producto", placeholder="Nombre o SKU. Ejemplo: fotografico, sticker, 180")
+
+    filtrados = []
+    for p in productos:
+        categoria = str(p["categoria"] or "Sin categoría")
+        if cat_sel != "Todas" and categoria != cat_sel:
+            continue
+        if bus:
+            b = bus.lower()
+            if (
+                b not in str(p["sku"]).lower()
+                and b not in str(p["descripcion"]).lower()
+                and b not in categoria.lower()
+            ):
+                continue
+        filtrados.append(p)
+
+    filtrados = sorted(filtrados, key=lambda p: str(p["descripcion"]).lower())
+
+    st.caption(f"{len(filtrados)} producto(s) disponibles en esta selección.")
+    if not filtrados:
+        st.info("No hay productos para esa categoría o búsqueda.")
+        return
+
+    opts = {
+        f"{p['descripcion']}  |  SKU: {p['sku']}  |  Stock: {p['wc_stock'] or 0}": p
+        for p in filtrados
+    }
+
+    seleccion = st.selectbox(
+        "Producto",
+        list(opts.keys()),
+        index=0,
+        help="Primero filtra por categoría y luego selecciona el producto de la lista."
+    )
+    prod = opts[seleccion]
+
+    col_img, col_base = st.columns([1.1, 3])
+    with col_img:
+        if prod["wc_imagen_url"]:
+            st.image(prod["wc_imagen_url"], use_container_width=True)
+        else:
+            st.markdown("<div style='height:220px;border-radius:14px;background:#f3f4f6;display:flex;align-items:center;justify-content:center;font-size:44px'>📦</div>", unsafe_allow_html=True)
+
+    with col_base:
+        st.markdown(f"### {prod['descripcion']}")
+        st.caption(f"SKU: {prod['sku']} · Categoría: {prod['categoria'] or 'Sin categoría'}")
+        sim1, sim2, sim3, sim4 = st.columns(4)
+        costo_unit = sim1.number_input("Costo proveedor unitario", min_value=0.0, value=float(prod["costo_proveedor_unitario"] or 0), step=0.01)
+        envio_bulto = sim2.number_input("Envío por bulto", min_value=0.0, value=float(prod["envio_costo_bulto"] or 0), step=0.01)
+        otros_bulto = sim3.number_input("Otros costos por bulto", min_value=0.0, value=float(prod["otros_costos_bulto"] or 0), step=0.01)
+        margen_obj = sim4.number_input("Margen objetivo %", min_value=0.0, max_value=90.0, value=float(prod["margen_minimo_pct"] or 25), step=1.0)
+
+        pv1, pv2, pv3 = st.columns(3)
+        precio_unidad = pv1.number_input("Venta unidad", min_value=0.0, value=float(prod["precio_unidad"] or 0), step=0.01)
+        precio_docena = pv2.number_input("Venta docena c/u", min_value=0.0, value=float(prod["precio_docena"] or 0), step=0.01)
+        precio_bulto = pv3.number_input("Venta bulto c/u", min_value=0.0, value=float(prod["precio_bulto"] or 0), step=0.01)
+
+    sim = dict(prod)
+    sim.update({
+        "costo_proveedor_unitario": costo_unit,
+        "envio_costo_bulto": envio_bulto,
+        "otros_costos_bulto": otros_bulto,
+        "margen_minimo_pct": margen_obj,
+        "precio_unidad": precio_unidad,
+        "precio_docena": precio_docena,
+        "precio_bulto": precio_bulto,
+    })
+    m = calc_costos_margen(sim)
+    sugerido = precio_sugerido_por_margen(m["costo_real_unitario"], margen_obj)
+
+    st.markdown("---")
+    a1, a2, a3, a4 = st.columns(4)
+    a1.metric("Costo proveedor c/u", money_usd(m["costo_proveedor_unitario"]))
+    a2.metric("Costo logístico c/u", money_usd(m["costo_logistico_unitario"]))
+    a3.metric("Costo real c/u", money_usd(m["costo_real_unitario"]))
+    a4.metric("Precio sugerido objetivo", money_usd(sugerido))
+
+    st.markdown("### Margen real según tus precios actuales")
+    c1, c2, c3 = st.columns(3)
+    for col, title, data in [(c1, "Unidad", m["unidad"]), (c2, "Docena c/u", m["docena"]), (c3, "Bulto c/u", m["bulto"])]:
+        with col:
+            estado = etiqueta_margen(data["margen_pct"], margen_obj)
+            falta = max(0, sugerido - float(data["precio"] or 0))
+            st.markdown(f"""
+            <div class="card">
+                <div style="font-weight:900;font-size:1.15rem;">{title}</div>
+                <div class="muted">Precio venta actual</div>
+                <div style="font-weight:900;font-size:1.4rem;">{money_usd(data['precio'])}</div>
+                <div class="muted">Costo real c/u: {money_usd(m['costo_real_unitario'])}</div>
+                <div style="font-weight:800;color:#047857;">Ganancia c/u: {money_usd(data['ganancia'])}</div>
+                <div style="font-weight:900;">Margen real: {data['margen_pct']:.1f}%</div>
+                <div>{estado}</div>
+                <div class="muted" style="margin-top:6px;">Para margen {margen_obj:.0f}%: {money_usd(sugerido)}</div>
+                <div class="muted">Diferencia: {money_usd(falta)}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    st.markdown("### Bulto completo")
+    b1, b2, b3, b4 = st.columns(4)
+    b1.metric("Ingreso bulto", money_usd(m["ingreso_bulto"]))
+    b2.metric("Costo total bulto", money_usd(m["costo_bulto"]))
+    b3.metric("Ganancia bulto", money_usd(m["ganancia_bulto_total"]))
+    b4.metric("Margen bulto", f"{m['margen_bulto_total']:.1f}%")
+
+    st.markdown("### Sugerido MercadoLibre")
+    st.caption("Fórmula: Precio en divisas x Tasa proveedor + % comisión MercadoLibre configurable.")
+    com_ml = get_comision_ml_pct()
+    ml1, ml2, ml3 = st.columns(3)
+    for col, titulo, precio in [
+        (ml1, "Unidad", precio_unidad),
+        (ml2, "Docena c/u", precio_docena),
+        (ml3, "Bulto c/u", precio_bulto),
+    ]:
+        bs_ml, bcv_equiv = precio_ml_resumen(precio)
+        with col:
+            st.markdown(f"""
+            <div class="card">
+                <div style="font-weight:900;font-size:1.1rem;">{titulo}</div>
+                <div class="muted">Precio divisas base: {money_usd(precio)}</div>
+                <div class="muted">Comisión ML: {com_ml:.1f}%</div>
+                <div style="font-weight:900;font-size:1.35rem;color:#1d4ed8;">{money_bs(bs_ml)}</div>
+                <div class="muted">Equivalente BCV: ${bcv_equiv:,.2f}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    st.markdown("### Aplicar sugerencia")
+    st.caption("El margen objetivo no cambia el margen real por sí solo; sirve para calcular precio sugerido. Puedes aplicarlo a una o varias escalas.")
+    ap1, ap2, ap3 = st.columns(3)
+    aplicar_unidad = ap1.checkbox("Aplicar sugerido a unidad")
+    aplicar_docena = ap2.checkbox("Aplicar sugerido a docena c/u")
+    aplicar_bulto = ap3.checkbox("Aplicar sugerido a bulto c/u")
+
+    if st.button("💾 Guardar costos/precios", type="primary", use_container_width=True):
+        new_unidad = sugerido if aplicar_unidad else precio_unidad
+        new_docena = sugerido if aplicar_docena else precio_docena
+        new_bulto = sugerido if aplicar_bulto else precio_bulto
+        q("""UPDATE productos SET costo_proveedor_unitario=?, envio_costo_bulto=?, otros_costos_bulto=?,
+             margen_minimo_pct=?, precio_unidad=?, precio_docena=?, precio_bulto=?, actualizado_en=? WHERE sku=?""",
+          (costo_unit, envio_bulto, otros_bulto, margen_obj, new_unidad, new_docena, new_bulto, now(), prod["sku"]))
+        st.success("Producto actualizado.")
+        st.rerun()
+
+
+def publicaciones():
+    st.title("📢 Publicaciones")
+    df = pd.read_sql_query("""SELECT sku,descripcion,wc_stock,activo,pub_web,pub_instagram,pub_mercadolibre,pub_marketplace,pub_whatsapp,
+                              link_instagram,link_mercadolibre,link_marketplace,notas_publicacion
+                              FROM productos ORDER BY descripcion""", get_conn())
+    if df.empty:
+        st.info("No hay productos.")
+        return
+    f1, f2 = st.columns([2, 1])
+    bus = f1.text_input("Buscar producto", placeholder="SKU o descripción")
+    filtro = f2.selectbox("Filtro", ["Todos", "Pendientes Instagram", "Pendientes MercadoLibre", "Pendientes Marketplace", "Pendientes WhatsApp", "Publicados en todos", "Con stock"])
+
+    df_f = df.copy()
+    if bus:
+        b = bus.lower()
+        df_f = df_f[df_f["sku"].astype(str).str.lower().str.contains(b) | df_f["descripcion"].astype(str).str.lower().str.contains(b)]
+    if filtro == "Pendientes Instagram":
+        df_f = df_f[df_f["pub_instagram"] == 0]
+    elif filtro == "Pendientes MercadoLibre":
+        df_f = df_f[df_f["pub_mercadolibre"] == 0]
+    elif filtro == "Pendientes Marketplace":
+        df_f = df_f[df_f["pub_marketplace"] == 0]
+    elif filtro == "Pendientes WhatsApp":
+        df_f = df_f[df_f["pub_whatsapp"] == 0]
+    elif filtro == "Publicados en todos":
+        df_f = df_f[(df_f["pub_instagram"]==1)&(df_f["pub_mercadolibre"]==1)&(df_f["pub_marketplace"]==1)&(df_f["pub_whatsapp"]==1)&(df_f["pub_web"]==1)]
+    elif filtro == "Con stock":
+        df_f = df_f[df_f["wc_stock"] > 0]
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Total filtrado", len(df_f))
+    c2.metric("Pend. IG", int((df["pub_instagram"]==0).sum()))
+    c3.metric("Pend. ML", int((df["pub_mercadolibre"]==0).sum()))
+    c4.metric("Pend. Market", int((df["pub_marketplace"]==0).sum()))
+    c5.metric("Pend. WA", int((df["pub_whatsapp"]==0).sum()))
+
+    for _, r in df_f.iterrows():
+        with st.expander(f"{r['descripcion']} — {r['sku']}"):
+            st.caption(f"Stock web: {int(r['wc_stock'] or 0)}")
+            p1, p2, p3, p4, p5 = st.columns(5)
+            web = p1.checkbox("Web", value=bool(r["pub_web"]), key=f"pub_web_{r['sku']}")
+            ig = p2.checkbox("Instagram", value=bool(r["pub_instagram"]), key=f"pub_ig_{r['sku']}")
+            ml = p3.checkbox("MercadoLibre", value=bool(r["pub_mercadolibre"]), key=f"pub_ml_{r['sku']}")
+            mk = p4.checkbox("Marketplace", value=bool(r["pub_marketplace"]), key=f"pub_mk_{r['sku']}")
+            wa = p5.checkbox("WhatsApp", value=bool(r["pub_whatsapp"]), key=f"pub_wa_{r['sku']}")
+            l1, l2, l3 = st.columns(3)
+            link_ig = l1.text_input("Link IG", value=r["link_instagram"] or "", key=f"link_ig_{r['sku']}")
+            link_ml = l2.text_input("Link ML", value=r["link_mercadolibre"] or "", key=f"link_ml_{r['sku']}")
+            link_mk = l3.text_input("Link Marketplace", value=r["link_marketplace"] or "", key=f"link_mk_{r['sku']}")
+            notas = st.text_area("Notas", value=r["notas_publicacion"] or "", key=f"notas_pub_{r['sku']}")
+            if st.button("💾 Guardar publicación", key=f"save_pub_{r['sku']}"):
+                q("""UPDATE productos SET pub_web=?,pub_instagram=?,pub_mercadolibre=?,pub_marketplace=?,pub_whatsapp=?,
+                     link_instagram=?,link_mercadolibre=?,link_marketplace=?,notas_publicacion=?,actualizado_en=? WHERE sku=?""",
+                  (1 if web else 0, 1 if ig else 0, 1 if ml else 0, 1 if mk else 0, 1 if wa else 0,
+                   link_ig, link_ml, link_mk, notas, now(), r["sku"]))
+                st.success("Actualizado.")
+                st.rerun()
+
+
+def vendedores_asignaciones():
+    st.title("👤 Vendedores / Asignaciones")
+    st.caption("Panel comercial para asignar productos, revisar pendientes y copiar una lista para WhatsApp.")
+
+    vendedores = q("SELECT username,nombre FROM usuarios WHERE rol IN ('vendedor','comprador','admin') AND activo=1 ORDER BY nombre", fetch=True)
+    if not vendedores:
+        st.info("No hay usuarios activos.")
+        return
+
+    opts = {f"{v['nombre'] or v['username']} — {v['username']}": v for v in vendedores}
+    vend = opts[st.selectbox("Vendedor / responsable", list(opts.keys()))]
+
+    asign = q("""SELECT p.*, c.nombre AS categoria, pv.fecha_asignacion
+                 FROM productos_vendedores pv
+                 JOIN productos p ON p.sku=pv.sku
+                 LEFT JOIN categorias c ON p.categoria_id=c.id
+                 WHERE pv.vendedor_username=? AND p.activo=1
+                 ORDER BY p.descripcion""", (vend["username"],), fetch=True)
+
+    total_asig = len(asign)
+    con_stock = sum(1 for p in asign if int(p["wc_stock"] or 0) > 0)
+    pend_ig = sum(1 for p in asign if not int(p["pub_instagram"] or 0))
+    pend_ml = sum(1 for p in asign if not int(p["pub_mercadolibre"] or 0))
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Asignados", total_asig)
+    k2.metric("Con stock", con_stock)
+    k3.metric("Pend. Instagram", pend_ig)
+    k4.metric("Pend. MercadoLibre", pend_ml)
+
+    tab1, tab2, tab3 = st.tabs(["Panel del vendedor", "Asignar productos", "Texto para WhatsApp"])
+
+    with tab1:
+        f1, f2, f3 = st.columns([2, 1.2, 1.2])
+        bus = f1.text_input("Buscar asignados", placeholder="SKU o descripción")
+        filtro = f2.selectbox("Filtro", ["Todos", "Con stock", "Sin stock", "Pendientes publicación", "Pendientes Instagram", "Pendientes MercadoLibre"])
+        ordenar = f3.selectbox("Ordenar", ["Descripción", "Stock mayor", "Stock menor", "Categoría"])
+
+        lista = list(asign)
+        if bus:
+            b = bus.lower()
+            lista = [p for p in lista if b in str(p["sku"]).lower() or b in str(p["descripcion"]).lower()]
+        if filtro == "Con stock":
+            lista = [p for p in lista if int(p["wc_stock"] or 0) > 0]
+        elif filtro == "Sin stock":
+            lista = [p for p in lista if int(p["wc_stock"] or 0) <= 0]
+        elif filtro == "Pendientes publicación":
+            lista = [p for p in lista if pendientes_publicacion(p)]
+        elif filtro == "Pendientes Instagram":
+            lista = [p for p in lista if not int(p["pub_instagram"] or 0)]
+        elif filtro == "Pendientes MercadoLibre":
+            lista = [p for p in lista if not int(p["pub_mercadolibre"] or 0)]
+
+        if ordenar == "Stock mayor":
+            lista = sorted(lista, key=lambda x: int(x["wc_stock"] or 0), reverse=True)
+        elif ordenar == "Stock menor":
+            lista = sorted(lista, key=lambda x: int(x["wc_stock"] or 0))
+        elif ordenar == "Categoría":
+            lista = sorted(lista, key=lambda x: str(x["categoria"] or ""))
+
+        if not lista:
+            st.info("No hay productos asignados que coincidan.")
+        for p in lista:
+            disp = disponibilidad(p)
+            pend = pendientes_publicacion(p)
+            pend_txt = ", ".join(pend) if pend else "Completo"
+            with st.container():
+                col_img, col_info, col_acc = st.columns([0.8, 3.2, 1.2])
+                with col_img:
+                    if p["wc_imagen_url"]:
+                        st.image(p["wc_imagen_url"], width=95)
+                    else:
+                        st.markdown("<div style='height:90px;border-radius:10px;background:#f3f4f6;display:flex;align-items:center;justify-content:center;font-size:26px'>📦</div>", unsafe_allow_html=True)
+                with col_info:
+                    st.markdown(f"**{p['descripcion']}**")
+                    st.caption(f"{p['sku']} · {p['categoria'] or 'Sin categoría'} · {resumen_publicacion_icons(p)}")
+                    st.write(f"Stock: **{p['wc_stock'] or 0} und** · Bultos: **{disp['bultos']}** · Pendiente: **{pend_txt}**")
+                    st.caption(f"Unidad: {money_usd(p['precio_unidad'])} · Docena c/u: {money_usd(p['precio_docena'])} · Bulto c/u: {money_usd(p['precio_bulto'])}")
+                with col_acc:
+                    if st.button("Quitar", key=f"quita_asig_{vend['username']}_{p['sku']}", use_container_width=True):
+                        q("DELETE FROM productos_vendedores WHERE sku=? AND vendedor_username=?", (p["sku"], vend["username"]))
+                        st.warning("Producto quitado.")
+                        st.rerun()
+                st.markdown("---")
+
+    with tab2:
+        productos = q("""SELECT p.*, c.nombre AS categoria FROM productos p
+                         LEFT JOIN categorias c ON p.categoria_id=c.id
+                         WHERE p.activo=1 ORDER BY p.descripcion""", fetch=True)
+        asignados = {r["sku"] for r in q("SELECT sku FROM productos_vendedores WHERE vendedor_username=?", (vend["username"],), fetch=True)}
+
+        a1, a2, a3 = st.columns([2.5, 1.3, 1.3])
+        bus2 = a1.text_input("Buscar producto para asignar", placeholder="SKU o descripción")
+        solo_stock = a2.checkbox("Solo con stock")
+        solo_no_asignados = a3.checkbox("Solo no asignados")
+
+        filtrados = []
+        for p in productos:
+            if bus2 and bus2.lower() not in p["sku"].lower() and bus2.lower() not in p["descripcion"].lower():
+                continue
+            if solo_stock and int(p["wc_stock"] or 0) <= 0:
+                continue
+            if solo_no_asignados and p["sku"] in asignados:
+                continue
+            filtrados.append(p)
+
+        st.caption(f"{len(filtrados)} productos disponibles para revisar.")
+        for p in filtrados:
+            checked = p["sku"] in asignados
+            nuevo = st.checkbox(f"{p['descripcion']} — {p['sku']} | Stock {p['wc_stock'] or 0}", value=checked, key=f"asig_{vend['username']}_{p['sku']}")
+            if nuevo != checked:
+                if nuevo:
+                    q("""INSERT OR IGNORE INTO productos_vendedores (sku,vendedor_username,fecha_asignacion,notas)
+                         VALUES (?,?,?,?)""", (p["sku"], vend["username"], now(), ""))
+                else:
+                    q("DELETE FROM productos_vendedores WHERE sku=? AND vendedor_username=?", (p["sku"], vend["username"]))
+                st.rerun()
+
+    with tab3:
+        modo = st.selectbox("Tipo de lista", ["Todos asignados", "Solo con stock", "Pendientes Instagram", "Pendientes MercadoLibre", "Pendientes publicación"])
+        lista = list(asign)
+        if modo == "Solo con stock":
+            lista = [p for p in lista if int(p["wc_stock"] or 0) > 0]
+        elif modo == "Pendientes Instagram":
+            lista = [p for p in lista if not int(p["pub_instagram"] or 0)]
+        elif modo == "Pendientes MercadoLibre":
+            lista = [p for p in lista if not int(p["pub_mercadolibre"] or 0)]
+        elif modo == "Pendientes publicación":
+            lista = [p for p in lista if pendientes_publicacion(p)]
+
+        lineas = [f"Hola {vend['nombre'] or vend['username']} 👋", "", f"Lista asignada ({modo}):", ""]
+        for i, p in enumerate(lista, start=1):
+            disp = disponibilidad(p)
+            pend = pendientes_publicacion(p)
+            pend_txt = ", ".join(pend) if pend else "Completo"
+            lineas += [
+                f"{i}. {p['sku']}",
+                f"{p['descripcion']}",
+                f"Stock: {p['wc_stock'] or 0} unidades / {disp['bultos']} bultos",
+                f"Unidad: {money_usd(p['precio_unidad'])} | Docena c/u: {money_usd(p['precio_docena'])} | Bulto c/u: {money_usd(p['precio_bulto'])}",
+                f"Pendiente: {pend_txt}",
+                ""
+            ]
+        texto = "\\n".join(lineas).strip()
+        st.text_area("Texto para copiar a WhatsApp", value=texto, height=380)
+        st.download_button("⬇️ Descargar lista TXT", data=texto.encode("utf-8"), file_name=f"lista_{vend['username']}.txt", mime="text/plain", use_container_width=True)
+
+
+# -----------------------------
+# TIENDA
+# -----------------------------
+@st.dialog("Imagen del producto")
+def dialog_imagen(nombre, sku, url):
+    st.markdown(f"### {nombre}")
+    st.caption(f"SKU: {sku}")
+    if url:
+        st.image(url, width=500)
+    else:
+        st.info("Este producto no tiene imagen sincronizada.")
 
 def cliente_activo_para_venta(user):
     """
@@ -1821,7 +4144,6 @@ def render_card_producto(prod, user, cliente_precio=None):
         price_lines = []
         etiqueta = " especial" if prod.get("_precio_especial_aplicado") else ""
         if int(prod["maneja_docena"] or 0):
-            inter_cant = producto_intermedia_cantidad(prod)
             if prod.get("_precio_especial_aplicado") and float(prod.get("_precio_especial_intermedia_total") or 0) > 0:
                 total_inter_usd = float(prod.get("_precio_especial_intermedia_total") or 0)
                 price_lines.append(f"{producto_intermedia_label(prod)} especial TOTAL: <b>{money_usd(total_inter_usd)}</b> · {money_bs(total_inter_usd * tasa)} <span class='muted'>({money_usd(prod['precio_docena'])} c/u)</span>")
