@@ -40,7 +40,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V60 Centro Admin y Abonos"
+APP_NAME = "Sistema de Insumos al Mayor V62 Tablas Accionables y Live UI"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -2481,7 +2481,35 @@ def admin_productos():
             params.extend([f"%{bus}%", f"%{bus}%"])
         sql += " ORDER BY p.activo DESC, c.orden, p.descripcion"
         df = pd.read_sql_query(sql, get_conn(), params=params)
-        st.dataframe(df[["sku","descripcion","categoria","precio_unidad","presentacion_intermedia_nombre","presentacion_intermedia_cantidad","precio_docena","precio_bulto","maneja_precio_especial","precio_especial_unidad","precio_especial_docena","precio_especial_bulto","bulto_contiene","wc_stock","activo","ultima_sync"]], use_container_width=True, hide_index=True)
+        cols_prod = ["sku","descripcion","categoria","precio_unidad","presentacion_intermedia_nombre","presentacion_intermedia_cantidad","precio_docena","precio_bulto","maneja_precio_especial","precio_especial_unidad","precio_especial_docena","precio_especial_bulto","bulto_contiene","wc_stock","activo","ultima_sync"]
+        st.dataframe(df[cols_prod], use_container_width=True, hide_index=True)
+
+        if not df.empty:
+            st.markdown("#### Acciones rápidas del producto")
+            opts_listado = {
+                f"{r['descripcion']} — {r['sku']}": r["sku"]
+                for _, r in df.head(300).iterrows()
+            }
+            sel_listado = st.selectbox("Seleccionar producto del listado", list(opts_listado.keys()), key="producto_listado_accion")
+            sku_accion = opts_listado[sel_listado]
+            prod_accion = q("SELECT * FROM productos WHERE sku=?", (sku_accion,), fetch=True)
+            prod_accion = prod_accion[0] if prod_accion else None
+
+            if prod_accion:
+                a1, a2, a3 = st.columns(3)
+                if a1.button("✏️ Cargar en edición", use_container_width=True, key=f"load_edit_{sku_accion}"):
+                    st.session_state["sku_producto_editar"] = sku_accion
+                    st.success("Producto cargado. Abre la pestaña Crear / Editar para modificarlo.")
+                activo_actual = int(prod_accion["activo"] or 0) == 1
+                texto_toggle = "⏸️ Desactivar" if activo_actual else "▶️ Activar"
+                if a2.button(texto_toggle, use_container_width=True, key=f"toggle_activo_{sku_accion}"):
+                    q("UPDATE productos SET activo=?, actualizado_en=? WHERE sku=?", (0 if activo_actual else 1, now(), sku_accion))
+                    st.success("Estado del producto actualizado.")
+                    st.rerun()
+                if a3.button("🔄 Sync WooCommerce", use_container_width=True, key=f"sync_prod_{sku_accion}"):
+                    ok, msg = sync_producto_wc(sku_accion)
+                    st.success(msg) if ok else st.warning(msg)
+                    st.rerun()
 
     with tab_form:
         st.subheader("Crear o editar producto")
@@ -2927,6 +2955,16 @@ def admin_cotizaciones():
         st.success("Estado de cotización actualizado.")
         st.rerun()
 
+    rows_det = q("SELECT * FROM cotizaciones WHERE id=?", (int(cot_id),), fetch=True)
+    if rows_det:
+        cot_det = rows_det[0]
+        with st.expander("Ver detalle de cotización", expanded=False):
+            st.write(f"Cliente: **{cot_det['cliente_nombre']}** · Total: **{money_usd(cot_det['total_usd'])}**")
+            items_cot = pd.DataFrame(pedido_items_rows(cot_det))
+            if not items_cot.empty:
+                st.dataframe(items_cot, use_container_width=True, hide_index=True,
+                             column_config={"Subtotal USD": st.column_config.NumberColumn(format="$%.2f")})
+
     c3, c4 = st.columns(2)
     tipo_convertir = c3.radio("Convertir como", ["Contado", "Crédito"], horizontal=True, key=f"tipo_convertir_cot_{cot_id}")
     if c4.button("➡️ Convertir cotización en pedido", use_container_width=True):
@@ -2941,12 +2979,12 @@ def admin_cotizaciones():
                 q("UPDATE cotizaciones SET status='Convertida en pedido' WHERE id=?", (int(cot_id),))
                 st.success(f"Cotización convertida en pedido #{pid}.")
                 st.rerun()
-            else:
-                st.error(msg)
-    confirmar = st.checkbox("Confirmar eliminación de cotización")
-    if c2.button("🗑️ Eliminar cotización", disabled=not confirmar, use_container_width=True):
-        eliminar_cotizacion(int(cot_id))
-        st.success("Cotización eliminada.")
+
+    st.markdown("#### Zona sensible")
+    confirmar_del_cot = st.checkbox("Confirmar eliminación de cotización", key=f"confirm_del_cot_{cot_id}")
+    if st.button("🗑️ Eliminar cotización", disabled=not confirmar_del_cot, use_container_width=True, key=f"del_cot_{cot_id}"):
+        q("DELETE FROM cotizaciones WHERE id=?", (int(cot_id),))
+        st.warning("Cotización eliminada.")
         st.rerun()
 
 
@@ -3452,8 +3490,9 @@ def mis_creditos():
             tipo = str(c["tipo_credito"] if "tipo_credito" in c.keys() and c["tipo_credito"] else "usd").lower()
             saldo_txt = f"{money_usd(c['saldo_bcv'] or c['saldo_usd'])} BCV" if tipo == "bcv" else money_usd(c["saldo_usd"])
             return f"Crédito #{c['id']} - {c['cliente_nombre']} - saldo {saldo_txt}"
+
         opts = {opt_label(c): c for c in creditos_pend}
-        sel = st.selectbox("Crédito", list(opts.keys()))
+        sel = st.selectbox("Crédito", list(opts.keys()), key="mis_creditos_credito_sel")
         cr = opts[sel]
         tipo = str(cr["tipo_credito"] if "tipo_credito" in cr.keys() and cr["tipo_credito"] else "usd").lower()
 
@@ -3463,9 +3502,16 @@ def mis_creditos():
             st.warning("No hay métodos de pago activos. El admin debe cargarlos en Métodos de pago. Puedes notificar igualmente usando 'Por confirmar'.")
             metodo_opts = {"Por confirmar": None}
 
-        with st.form("form_abono"):
-            if tipo == "bcv":
-                saldo_bcv = float(cr["saldo_bcv"] or cr["saldo_usd"] or 0)
+        # Importante: selector fuera del formulario para que actualice datos en vivo.
+        metodo_key = f"metodo_pago_credito_{tipo}_{cr['id']}"
+        metodo_sel = st.selectbox("Método de pago", list(metodo_opts.keys()), key=metodo_key)
+        mp = metodo_opts[metodo_sel]
+        if mp:
+            render_metodo_pago_card(mp)
+
+        if tipo == "bcv":
+            saldo_bcv = float(cr["saldo_bcv"] or cr["saldo_usd"] or 0)
+            with st.form(f"form_abono_bcv_{cr['id']}"):
                 monto_bcv = st.number_input("Monto a pagar en $ BCV", min_value=0.01, max_value=saldo_bcv, value=min(10.0, saldo_bcv), step=0.01)
                 tasa_actual = get_tasa_bcv()
                 monto_bs = monto_bcv * tasa_actual
@@ -3474,16 +3520,13 @@ def mis_creditos():
                     f"Debes transferir: {money_bs(monto_bs)}\n\n"
                     "Esta tasa quedará guardada en la notificación del pago."
                 )
-                metodo_sel = st.selectbox("Método de pago", list(metodo_opts.keys()), key="metodo_pago_credito_bcv")
-                mp = metodo_opts[metodo_sel]
-                if mp:
-                    render_metodo_pago_card(mp)
                 ref = st.text_input("Referencia")
                 comp = st.file_uploader("Comprobante", type=["jpg","jpeg","png","webp","pdf"])
                 notas = st.text_area("Notas")
                 submit = st.form_submit_button("Enviar pago BCV para validar", type="primary")
-            else:
-                saldo_usd = float(cr["saldo_usd"] or 0)
+        else:
+            saldo_usd = float(cr["saldo_usd"] or 0)
+            with st.form(f"form_abono_usd_{cr['id']}"):
                 monto = st.number_input("Monto USD que deseas abonar", min_value=0.01, max_value=saldo_usd, value=min(10.0, saldo_usd), step=0.01)
                 tasa_actual = get_tasa_proveedor()
                 monto_bs = monto * tasa_actual
@@ -3494,10 +3537,6 @@ def mis_creditos():
                     f"Monto a transferir: {money_bs(monto_bs)}\n\n"
                     "Esta tasa quedará guardada en la notificación del pago."
                 )
-                metodo_sel = st.selectbox("Método de pago", list(metodo_opts.keys()), key="metodo_pago_credito_usd")
-                mp = metodo_opts[metodo_sel]
-                if mp:
-                    render_metodo_pago_card(mp)
                 ref = st.text_input("Referencia")
                 comp = st.file_uploader("Comprobante", type=["jpg","jpeg","png","webp","pdf"])
                 notas = st.text_area("Notas")
@@ -3533,6 +3572,7 @@ def mis_creditos():
     if st.button("📄 Descargar estado de cuenta", use_container_width=True):
         pdf = generar_pdf_estado_cuenta(user["username"])
         st.download_button("⬇️ Estado de cuenta PDF", data=pdf, file_name=f"estado_cuenta_{user['username']}.pdf", mime="application/pdf", use_container_width=True)
+
 
 
 def admin_tareas_counts():
@@ -3636,6 +3676,94 @@ def admin_gestionar_abono(abono_id, key_prefix="abono_admin"):
             st.success("Abono eliminado.")
             st.rerun()
 
+def admin_panel_pedido(pedido_id, key_prefix="pedido_admin"):
+    rows = q("SELECT * FROM pedidos WHERE id=?", (int(pedido_id),), fetch=True)
+    if not rows:
+        st.error("Pedido no encontrado.")
+        return
+    p = rows[0]
+
+    st.markdown(f"### Pedido #{p['id']}")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total", money_usd(p["total_usd"]))
+    c2.metric("Cliente", str(p["cliente_nombre"])[:25])
+    c3.metric("Estado", p["status"])
+    c4.metric("POS", "Procesado" if int(p["pos_procesado"] or 0) else "Pendiente")
+
+    st.caption(f"Fecha: {p['fecha']} · Usuario: {p['username']} · Pago: {p['tipo_pago']} · Método: {p['metodo_pago'] or 'N/A'}")
+    if p["notas"]:
+        st.info(p["notas"])
+
+    items_df = pd.DataFrame(pedido_items_rows(p))
+    if not items_df.empty:
+        st.dataframe(items_df, use_container_width=True, hide_index=True,
+                     column_config={"Subtotal USD": st.column_config.NumberColumn(format="$%.2f")})
+
+    pdf = generar_pdf_pedido(int(pedido_id))
+    st.download_button("📄 Descargar PDF del pedido", data=pdf, file_name=f"pedido_{int(pedido_id):04d}.pdf",
+                       mime="application/pdf", use_container_width=True, key=f"{key_prefix}_pdf_{pedido_id}")
+
+    estados = ["Pendiente", "Pendiente de pago/entrega", "Crédito pendiente", "Crédito parcial", "Pago por validar",
+               "Confirmado", "Preparando", "Listo para entregar", "Entregado", "Finalizado / Pagado",
+               "Procesado en POS", "Cancelado", "Anulado"]
+
+    st.markdown("#### Acciones del pedido")
+    a1, a2 = st.columns(2)
+    with a1:
+        idx_estado = estados.index(p["status"]) if p["status"] in estados else 0
+        nuevo_estado = st.selectbox("Cambiar estado", estados, index=idx_estado, key=f"{key_prefix}_estado_{pedido_id}")
+        if st.button("💾 Guardar estado", use_container_width=True, key=f"{key_prefix}_guardar_estado_{pedido_id}"):
+            if nuevo_estado in ["Cancelado", "Anulado"]:
+                ok, msg = anular_credito_de_pedido(int(pedido_id), f"Pedido cambiado a {nuevo_estado} desde Centro admin")
+                if ok:
+                    q("UPDATE pedidos SET status=? WHERE id=?", (nuevo_estado, int(pedido_id)))
+                st.success(msg) if ok else st.error(msg)
+            elif nuevo_estado == "Finalizado / Pagado" and p["credito_id"]:
+                ok, msg = marcar_credito_pagado(int(p["credito_id"]), st.session_state.user["username"])
+                st.success(msg) if ok else st.error(msg)
+            else:
+                q("UPDATE pedidos SET status=? WHERE id=?", (nuevo_estado, int(pedido_id)))
+                st.success("Estado actualizado.")
+            st.rerun()
+
+    with a2:
+        if int(p["pos_procesado"] or 0) == 0:
+            notas_pos = st.text_area("Notas POS", key=f"{key_prefix}_notas_pos_{pedido_id}")
+            confirmar_pos = st.checkbox("Confirmar procesado en POS", key=f"{key_prefix}_confirm_pos_{pedido_id}")
+            if st.button("✅ Marcar procesado en POS", disabled=not confirmar_pos, use_container_width=True, key=f"{key_prefix}_pos_{pedido_id}"):
+                q("""UPDATE pedidos SET pos_procesado=1, pos_fecha=?, pos_usuario=?, pos_notas=?, status='Procesado en POS' WHERE id=?""",
+                  (now(), st.session_state.user["username"], notas_pos, int(pedido_id)))
+                st.success("Pedido marcado como procesado en POS.")
+                st.rerun()
+        else:
+            confirmar_reverso = st.checkbox("Confirmar reverso POS", key=f"{key_prefix}_confirm_reverso_pos_{pedido_id}")
+            if st.button("↩️ Volver a pendiente POS", disabled=not confirmar_reverso, use_container_width=True, key=f"{key_prefix}_reverso_pos_{pedido_id}"):
+                q("UPDATE pedidos SET pos_procesado=0, pos_fecha=NULL, pos_usuario=NULL, pos_notas=NULL, status='Confirmado' WHERE id=?", (int(pedido_id),))
+                st.warning("Pedido devuelto a pendiente POS.")
+                st.rerun()
+
+    st.markdown("#### Zona sensible")
+    b1, b2 = st.columns(2)
+    with b1:
+        confirmar_cancelar = st.checkbox("Confirmar cancelación/anulación", key=f"{key_prefix}_confirm_cancel_{pedido_id}")
+        estado_cancel = st.selectbox("Tipo de anulación", ["Cancelado", "Anulado"], key=f"{key_prefix}_cancel_tipo_{pedido_id}")
+        if st.button("🚫 Cancelar / Anular pedido", disabled=not confirmar_cancelar, use_container_width=True, key=f"{key_prefix}_cancel_{pedido_id}"):
+            ok, msg = anular_credito_de_pedido(int(pedido_id), f"Pedido {estado_cancel} desde Centro admin")
+            if ok:
+                q("UPDATE pedidos SET status=? WHERE id=?", (estado_cancel, int(pedido_id)))
+            st.success(msg) if ok else st.error(msg)
+            if ok:
+                st.rerun()
+
+    with b2:
+        confirmar_eliminar = st.checkbox("Confirmar eliminación definitiva", key=f"{key_prefix}_confirm_del_{pedido_id}")
+        if st.button("🗑️ Eliminar pedido", disabled=not confirmar_eliminar, use_container_width=True, key=f"{key_prefix}_del_{pedido_id}"):
+            ok, msg = eliminar_pedido_seguro(int(pedido_id))
+            st.success(msg) if ok else st.error(msg)
+            if ok:
+                st.rerun()
+
+
 def admin_centro_tareas():
     st.title("🔔 Centro admin")
     st.caption("Resumen de eventos y tareas pendientes del sistema.")
@@ -3670,7 +3798,14 @@ def admin_centro_tareas():
         if pedidos.empty:
             st.success("No hay pedidos pendientes.")
         else:
-            st.dataframe(pedidos, use_container_width=True, hide_index=True)
+            st.dataframe(pedidos, use_container_width=True, hide_index=True,
+                         column_config={"total_usd": st.column_config.NumberColumn(format="$%.2f")})
+            opts_ped = {
+                f"#{int(r['id'])} · {r['cliente_nombre']} · {money_usd(r['total_usd'])} · {r['status']}": int(r["id"])
+                for _, r in pedidos.iterrows()
+            }
+            sel_ped = st.selectbox("Gestionar pedido", list(opts_ped.keys()), key="centro_admin_pedido_sel")
+            admin_panel_pedido(opts_ped[sel_ped], key_prefix="centro_admin_pedido")
 
     with tab3:
         creditos = pd.read_sql_query("""SELECT id,pedido_id,username,cliente_nombre,fecha_inicio,fecha_vencimiento,
