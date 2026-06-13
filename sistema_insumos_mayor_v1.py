@@ -40,7 +40,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V54 Stock Inteligente y Precio Especial Fix"
+APP_NAME = "Sistema de Insumos al Mayor V55 Precio Especial Carrito Fix"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -1814,11 +1814,15 @@ def recalcular_item_carrito(item, nueva_cantidad=None, user=None):
     """
     Recalcula un item del carrito usando precios actuales del producto.
     Si se pasa user y el user es cliente especial, aplica precio especial del producto.
+    Si no se pasa user, intenta usar el cliente de precio guardado en el item.
     """
     sku = item.get("sku")
     prod = get_producto_row(sku)
     if not prod:
         return item
+
+    if user is None and item.get("cliente_precio_username"):
+        user = get_user(item.get("cliente_precio_username"))
 
     prod_precio = producto_con_precio_para_usuario(prod, user)
 
@@ -1840,6 +1844,9 @@ def recalcular_item_carrito(item, nueva_cantidad=None, user=None):
     item["imagen_url"] = prod["wc_imagen_url"]
     item["desc"] = prod["descripcion"]
     item["precio_especial_aplicado"] = bool(prod_precio.get("_precio_especial_aplicado", False))
+    if user is not None:
+        item["cliente_precio_username"] = user["username"]
+        item["cliente_precio_nombre"] = user["nombre"] or user["username"]
     if item["precio_especial_aplicado"]:
         item["detalle_precio"] = f"{item['detalle_precio']} · precio especial"
     return item
@@ -1853,11 +1860,12 @@ def texto_linea_carrito(item):
     precio_total = float(item.get("precio_total", 0) or 0)
     nombre = presentacion_display_item(item)
 
+    extra = " · ⭐ precio especial" if item.get("precio_especial_aplicado") else ""
     if presentacion == "unidad":
-        return f"{unidades} unidad(es) · Precio aplicado: {escala}"
+        return f"{unidades} unidad(es) · Precio aplicado: {escala}{extra}"
 
     if cantidad == 1:
-        return f"1 {nombre} = {unidades} unidad(es) · Total {nombre}: {money_usd(precio_total)}"
+        return f"1 {nombre} = {unidades} unidad(es) · Total {nombre}: {money_usd(precio_total)}{extra}"
 
     precio_pres = precio_total / cantidad if cantidad else 0
     return f"{cantidad} {nombre}(s) = {unidades} unidad(es) · {money_usd(precio_pres)} c/{nombre}"
@@ -4187,6 +4195,7 @@ def render_card_producto(prod, user, cliente_precio=None):
               <div class="catalog-selection-title">Selección actual</div>
               <div class="catalog-selection-value">{money_usd(precio_total_calc)}</div>
               <div class="muted">{unidades_base_total} unidad(es) base</div>
+              <div class="muted">{"⭐ precio especial aplicado" if prod.get("_precio_especial_aplicado") else ""}</div>
             </div>
             """,
             unsafe_allow_html=True
@@ -4222,6 +4231,8 @@ def render_card_producto(prod, user, cliente_precio=None):
                 "precio_total": precio_total_calc,
                 "peso_total_kg": float(prod["peso_unidad_kg"] or 0) * int(unidades_base_total),
                 "imagen_url": prod["wc_imagen_url"],
+                "cliente_precio_username": cliente_precio["username"],
+                "cliente_precio_nombre": cliente_precio["nombre"] or cliente_precio["username"],
             }
             carrito[key] = recalcular_item_carrito(item_tmp, cantidad_final, user=cliente_precio)
             guardar_carrito(user["username"], carrito)
@@ -4437,7 +4448,12 @@ def carrito_view():
 
     for key, item in list(carrito.items()):
         # Recalcula silenciosamente para mantener precios actuales y corregir visual.
-        item = recalcular_item_carrito(item, user=cliente_precio_carrito)
+        item_user_precio = cliente_precio_carrito
+        if item.get("cliente_precio_username") and item.get("cliente_precio_username") != user["username"]:
+            item_user_guardado = get_user(item.get("cliente_precio_username"))
+            if item_user_guardado:
+                item_user_precio = item_user_guardado
+        item = recalcular_item_carrito(item, user=item_user_precio)
         carrito[key] = item
         guardar_carrito(user["username"], carrito)
 
