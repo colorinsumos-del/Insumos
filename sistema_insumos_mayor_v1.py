@@ -40,7 +40,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V58 Precio Especial Optimizado y Pago Móvil"
+APP_NAME = "Sistema de Insumos al Mayor V60 Centro Admin y Abonos"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -1538,6 +1538,8 @@ def aplicar_abono_validado(abono_id, admin_username):
     ab = rows[0]
     if ab["status"] == "Validado":
         return False, "El abono ya fue validado."
+    if ab["status"] not in ["Pendiente de validar", "Rechazado"]:
+        return False, f"El abono no está disponible para validar. Estado actual: {ab['status']}."
 
     cr_rows = q("SELECT * FROM creditos WHERE id=?", (ab["credito_id"],), fetch=True)
     if not cr_rows:
@@ -3271,7 +3273,73 @@ def admin_metodos_pago():
     st.title("🏦 Métodos de pago")
     st.caption("Carga aquí los datos bancarios y métodos que verán los clientes al notificar pagos o abonos.")
 
-    tab_list, tab_form = st.tabs(["Listado", "Crear / Editar"])
+    tipos = ["Cuenta bancaria Venezuela", "Pago móvil", "Binance", "Banesco Panamá", "Zelle", "Efectivo", "Otro"]
+
+    def valor_mp(mp, campo, default=""):
+        try:
+            v = mp[campo] if mp and campo in mp.keys() and mp[campo] is not None else default
+            return v
+        except Exception:
+            return default
+
+    def campos_metodo_pago(tipo, prefix, mp=None):
+        banco = titular = cuenta = cedula_rif = tipo_cuenta = telefono = correo = apodo = ""
+
+        if tipo == "Cuenta bancaria Venezuela":
+            c1, c2 = st.columns(2)
+            banco = c1.text_input("Banco", value=valor_mp(mp, "banco"), key=f"{prefix}_banco")
+            titular = c2.text_input("Nombre titular", value=valor_mp(mp, "titular"), key=f"{prefix}_titular")
+            c3, c4, c5 = st.columns(3)
+            cuenta = c3.text_input("Número de cuenta", value=valor_mp(mp, "cuenta"), key=f"{prefix}_cuenta")
+            cedula_rif = c4.text_input("Cédula/RIF titular", value=valor_mp(mp, "cedula_rif"), key=f"{prefix}_cedula")
+            tipo_cuenta = c5.text_input("Tipo de cuenta", value=valor_mp(mp, "tipo_cuenta", "Corriente"), key=f"{prefix}_tipo_cuenta")
+
+        elif tipo == "Pago móvil":
+            st.info("Pago móvil usa Banco, Cédula/RIF, Teléfono y Nombre titular. No usa número de cuenta.")
+            c1, c2 = st.columns(2)
+            banco = c1.text_input("Banco", value=valor_mp(mp, "banco"), key=f"{prefix}_banco")
+            titular = c2.text_input("Nombre titular", value=valor_mp(mp, "titular"), key=f"{prefix}_titular")
+            c3, c4 = st.columns(2)
+            cedula_rif = c3.text_input("Cédula/RIF", value=valor_mp(mp, "cedula_rif"), key=f"{prefix}_cedula")
+            telefono = c4.text_input("Teléfono", value=valor_mp(mp, "telefono"), key=f"{prefix}_telefono")
+
+        elif tipo == "Binance":
+            c1, c2, c3 = st.columns(3)
+            correo = c1.text_input("Correo Binance", value=valor_mp(mp, "correo"), key=f"{prefix}_correo")
+            apodo = c2.text_input("Apodo / Pay ID", value=valor_mp(mp, "apodo"), key=f"{prefix}_apodo")
+            titular = c3.text_input("Nombre titular", value=valor_mp(mp, "titular"), key=f"{prefix}_titular")
+
+        elif tipo == "Banesco Panamá":
+            c1, c2, c3 = st.columns(3)
+            titular = c1.text_input("Titular", value=valor_mp(mp, "titular"), key=f"{prefix}_titular")
+            cuenta = c2.text_input("Número de cuenta", value=valor_mp(mp, "cuenta"), key=f"{prefix}_cuenta")
+            tipo_cuenta = c3.text_input("Tipo de cuenta", value=valor_mp(mp, "tipo_cuenta"), key=f"{prefix}_tipo_cuenta")
+
+        elif tipo == "Zelle":
+            c1, c2 = st.columns(2)
+            titular = c1.text_input("Nombre titular", value=valor_mp(mp, "titular"), key=f"{prefix}_titular")
+            correo = c2.text_input("Correo Zelle", value=valor_mp(mp, "correo"), key=f"{prefix}_correo")
+
+        elif tipo == "Efectivo":
+            titular = st.text_input("Responsable / titular", value=valor_mp(mp, "titular"), key=f"{prefix}_titular")
+
+        else:
+            c1, c2 = st.columns(2)
+            titular = c1.text_input("Titular / responsable", value=valor_mp(mp, "titular"), key=f"{prefix}_titular")
+            correo = c2.text_input("Correo / referencia", value=valor_mp(mp, "correo"), key=f"{prefix}_correo")
+
+        return {
+            "banco": banco,
+            "titular": titular,
+            "cuenta": cuenta,
+            "cedula_rif": cedula_rif,
+            "tipo_cuenta": tipo_cuenta,
+            "telefono": telefono,
+            "correo": correo,
+            "apodo": apodo,
+        }
+
+    tab_list, tab_create, tab_edit = st.tabs(["Listado", "Crear nuevo", "Editar / eliminar"])
 
     with tab_list:
         df = pd.read_sql_query("SELECT id,nombre,tipo,banco,titular,cuenta,cedula_rif,tipo_cuenta,telefono,correo,apodo,activo,notas FROM metodos_pago ORDER BY activo DESC,tipo,nombre", get_conn())
@@ -3280,85 +3348,67 @@ def admin_metodos_pago():
         else:
             st.dataframe(df, use_container_width=True, hide_index=True)
 
-    with tab_form:
-        metodos = q("SELECT * FROM metodos_pago ORDER BY activo DESC,tipo,nombre", fetch=True)
-        opts = ["Crear nuevo"] + [f"#{m['id']} · {m['nombre']} ({m['tipo']})" for m in metodos]
-        mapa = {f"#{m['id']} · {m['nombre']} ({m['tipo']})": m for m in metodos}
-        sel = st.selectbox("Seleccionar método", opts)
-        edit = mapa.get(sel)
+    with tab_create:
+        st.subheader("Agregar método nuevo")
+        st.caption("Esta pantalla siempre crea un método nuevo. No sobrescribe métodos existentes.")
 
-        tipos = ["Cuenta bancaria Venezuela", "Pago móvil", "Binance", "Banesco Panamá", "Zelle", "Efectivo", "Otro"]
-        tipo_actual = edit["tipo"] if edit and edit["tipo"] in tipos else tipos[0]
+        tipo_nuevo = st.selectbox("Tipo de método", tipos, key="mp_create_tipo")
+        nombre_nuevo = st.text_input("Nombre visible", placeholder="Ej: BNC Jurídica COLOR INSUMOS", key="mp_create_nombre")
+        campos = campos_metodo_pago(tipo_nuevo, "mp_create")
+        notas_nuevo = st.text_area("Notas internas / instrucciones", key="mp_create_notas")
+        activo_nuevo = st.checkbox("Método activo", value=True, key="mp_create_activo")
 
-        with st.form("form_metodo_pago"):
-            nombre = st.text_input("Nombre visible", value=edit["nombre"] if edit else "", placeholder="Ej: BNC Jurídica COLOR INSUMOS")
-            tipo = st.selectbox("Tipo", tipos, index=tipos.index(tipo_actual))
-
-            banco = titular = cuenta = cedula_rif = tipo_cuenta = telefono = correo = apodo = ""
-            notas = st.text_area("Notas internas / instrucciones", value=edit["notas"] if edit and edit["notas"] else "")
-
-            if tipo == "Cuenta bancaria Venezuela":
-                c1, c2 = st.columns(2)
-                banco = c1.text_input("Banco", value=edit["banco"] if edit and edit["banco"] else "")
-                titular = c2.text_input("Nombre titular", value=edit["titular"] if edit and edit["titular"] else "")
-                c3, c4, c5 = st.columns(3)
-                cuenta = c3.text_input("Número de cuenta", value=edit["cuenta"] if edit and edit["cuenta"] else "")
-                cedula_rif = c4.text_input("Cédula/RIF titular", value=edit["cedula_rif"] if edit and edit["cedula_rif"] else "")
-                tipo_cuenta = c5.text_input("Tipo de cuenta", value=edit["tipo_cuenta"] if edit and edit["tipo_cuenta"] else "Corriente")
-            elif tipo == "Pago móvil":
-                c1, c2 = st.columns(2)
-                banco = c1.text_input("Banco", value=edit["banco"] if edit and edit["banco"] else "")
-                titular = c2.text_input("Nombre titular", value=edit["titular"] if edit and edit["titular"] else "")
-                c3, c4 = st.columns(2)
-                cedula_rif = c3.text_input("Cédula/RIF", value=edit["cedula_rif"] if edit and edit["cedula_rif"] else "")
-                telefono = c4.text_input("Teléfono", value=edit["telefono"] if edit and edit["telefono"] else "")
-            elif tipo == "Binance":
-                c1, c2, c3 = st.columns(3)
-                correo = c1.text_input("Correo Binance", value=edit["correo"] if edit and edit["correo"] else "")
-                apodo = c2.text_input("Apodo / Pay ID", value=edit["apodo"] if edit and edit["apodo"] else "")
-                titular = c3.text_input("Nombre titular", value=edit["titular"] if edit and edit["titular"] else "")
-            elif tipo == "Banesco Panamá":
-                c1, c2, c3 = st.columns(3)
-                titular = c1.text_input("Titular", value=edit["titular"] if edit and edit["titular"] else "")
-                cuenta = c2.text_input("Número de cuenta", value=edit["cuenta"] if edit and edit["cuenta"] else "")
-                tipo_cuenta = c3.text_input("Tipo de cuenta", value=edit["tipo_cuenta"] if edit and edit["tipo_cuenta"] else "")
-            elif tipo == "Zelle":
-                c1, c2 = st.columns(2)
-                titular = c1.text_input("Nombre titular", value=edit["titular"] if edit and edit["titular"] else "")
-                correo = c2.text_input("Correo Zelle", value=edit["correo"] if edit and edit["correo"] else "")
-            elif tipo == "Efectivo":
-                titular = st.text_input("Responsable / titular", value=edit["titular"] if edit and edit["titular"] else "")
-            else:
-                c1, c2 = st.columns(2)
-                titular = c1.text_input("Titular / responsable", value=edit["titular"] if edit and edit["titular"] else "")
-                correo = c2.text_input("Correo / referencia", value=edit["correo"] if edit and edit["correo"] else "")
-
-            activo = st.checkbox("Método activo", value=bool(edit["activo"]) if edit else True)
-
-            csave, cdel = st.columns(2)
-            guardar = csave.form_submit_button("💾 Guardar método", type="primary")
-            eliminar = cdel.form_submit_button("🗑️ Eliminar método", disabled=not bool(edit))
-
-        if guardar:
-            if not nombre.strip():
+        if st.button("➕ Crear método de pago", type="primary", use_container_width=True, key="mp_create_btn"):
+            if not nombre_nuevo.strip():
                 st.error("El nombre visible es obligatorio.")
             else:
-                if edit:
-                    q("""UPDATE metodos_pago SET nombre=?,tipo=?,banco=?,titular=?,cuenta=?,cedula_rif=?,tipo_cuenta=?,telefono=?,correo=?,apodo=?,activo=?,notas=?,actualizado_en=? WHERE id=?""",
-                      (nombre.strip(), tipo, banco, titular, cuenta, cedula_rif, tipo_cuenta, telefono, correo, apodo, 1 if activo else 0, notas, now(), int(edit["id"])))
-                    st.success("Método actualizado.")
-                else:
-                    q("""INSERT INTO metodos_pago
-                         (nombre,tipo,banco,titular,cuenta,cedula_rif,tipo_cuenta,telefono,correo,apodo,activo,notas,creado_en,actualizado_en)
-                         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                      (nombre.strip(), tipo, banco, titular, cuenta, cedula_rif, tipo_cuenta, telefono, correo, apodo, 1 if activo else 0, notas, now(), now()))
-                    st.success("Método creado.")
+                q("""INSERT INTO metodos_pago
+                     (nombre,tipo,banco,titular,cuenta,cedula_rif,tipo_cuenta,telefono,correo,apodo,activo,notas,creado_en,actualizado_en)
+                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                  (nombre_nuevo.strip(), tipo_nuevo, campos["banco"], campos["titular"], campos["cuenta"],
+                   campos["cedula_rif"], campos["tipo_cuenta"], campos["telefono"], campos["correo"], campos["apodo"],
+                   1 if activo_nuevo else 0, notas_nuevo, now(), now()))
+                st.success("Método creado correctamente.")
                 st.rerun()
 
-        if eliminar and edit:
-            q("DELETE FROM metodos_pago WHERE id=?", (int(edit["id"]),))
-            st.warning("Método eliminado.")
-            st.rerun()
+    with tab_edit:
+        st.subheader("Editar método existente")
+        metodos = q("SELECT * FROM metodos_pago ORDER BY activo DESC,tipo,nombre", fetch=True)
+        if not metodos:
+            st.info("No hay métodos para editar.")
+        else:
+            opts = {f"#{m['id']} · {m['nombre']} ({m['tipo']})": m for m in metodos}
+            sel = st.selectbox("Selecciona método a editar", list(opts.keys()), key="mp_edit_select")
+            edit = opts[sel]
+            edit_id = int(edit["id"])
+
+            tipo_edit_actual = edit["tipo"] if edit["tipo"] in tipos else tipos[0]
+            tipo_edit = st.selectbox("Tipo de método", tipos, index=tipos.index(tipo_edit_actual), key=f"mp_edit_tipo_{edit_id}")
+            nombre_edit = st.text_input("Nombre visible", value=edit["nombre"] or "", key=f"mp_edit_nombre_{edit_id}")
+            campos_edit = campos_metodo_pago(tipo_edit, f"mp_edit_{edit_id}", edit)
+            notas_edit = st.text_area("Notas internas / instrucciones", value=edit["notas"] or "", key=f"mp_edit_notas_{edit_id}")
+            activo_edit = st.checkbox("Método activo", value=bool(edit["activo"]), key=f"mp_edit_activo_{edit_id}")
+
+            c1, c2 = st.columns(2)
+            if c1.button("💾 Guardar cambios", type="primary", use_container_width=True, key=f"mp_edit_save_{edit_id}"):
+                if not nombre_edit.strip():
+                    st.error("El nombre visible es obligatorio.")
+                else:
+                    q("""UPDATE metodos_pago
+                         SET nombre=?,tipo=?,banco=?,titular=?,cuenta=?,cedula_rif=?,tipo_cuenta=?,telefono=?,correo=?,apodo=?,activo=?,notas=?,actualizado_en=?
+                         WHERE id=?""",
+                      (nombre_edit.strip(), tipo_edit, campos_edit["banco"], campos_edit["titular"], campos_edit["cuenta"],
+                       campos_edit["cedula_rif"], campos_edit["tipo_cuenta"], campos_edit["telefono"], campos_edit["correo"],
+                       campos_edit["apodo"], 1 if activo_edit else 0, notas_edit, now(), edit_id))
+                    st.success("Método actualizado correctamente.")
+                    st.rerun()
+
+            confirmar = st.checkbox("Confirmar eliminación definitiva", key=f"mp_edit_confirm_delete_{edit_id}")
+            if c2.button("🗑️ Eliminar método", disabled=not confirmar, use_container_width=True, key=f"mp_edit_delete_{edit_id}"):
+                q("DELETE FROM metodos_pago WHERE id=?", (edit_id,))
+                st.warning("Método eliminado.")
+                st.rerun()
+
 
 
 def mis_creditos():
@@ -3485,6 +3535,157 @@ def mis_creditos():
         st.download_button("⬇️ Estado de cuenta PDF", data=pdf, file_name=f"estado_cuenta_{user['username']}.pdf", mime="application/pdf", use_container_width=True)
 
 
+def admin_tareas_counts():
+    try:
+        pagos = q("SELECT COUNT(*) AS n FROM abonos WHERE status='Pendiente de validar'", fetch=True)[0]["n"]
+    except Exception:
+        pagos = 0
+    try:
+        pedidos = q("""SELECT COUNT(*) AS n FROM pedidos
+                       WHERE status NOT IN ('Finalizado / Pagado','Cancelado','Anulado')
+                       AND COALESCE(status,'') NOT LIKE '%Finalizado%'""", fetch=True)[0]["n"]
+    except Exception:
+        pedidos = 0
+    try:
+        creditos = q("""SELECT COUNT(*) AS n FROM creditos
+                        WHERE status NOT IN ('Pagado','Anulado')
+                        AND (COALESCE(saldo_usd,0)>0 OR COALESCE(saldo_bcv,0)>0)""", fetch=True)[0]["n"]
+    except Exception:
+        creditos = 0
+    return {"pagos": int(pagos or 0), "pedidos": int(pedidos or 0), "creditos": int(creditos or 0)}
+
+def abono_resumen_label(ab):
+    tipo = str(ab["tipo_credito"] if "tipo_credito" in ab.keys() and ab["tipo_credito"] else "usd").lower()
+    monto_txt = f"{money_usd(ab['monto_bcv'] or ab['monto_usd'])} BCV" if tipo == "bcv" else money_usd(ab["monto_usd"])
+    return f"#{ab['id']} · Crédito #{ab['credito_id']} · {ab['username']} · {monto_txt} · {ab['status']}"
+
+def admin_gestionar_abono(abono_id, key_prefix="abono_admin"):
+    rows = q("SELECT * FROM abonos WHERE id=?", (int(abono_id),), fetch=True)
+    if not rows:
+        st.error("Abono no encontrado.")
+        return
+    ab = rows[0]
+    tipo_ab = str(ab["tipo_credito"] if "tipo_credito" in ab.keys() and ab["tipo_credito"] else "usd").lower()
+
+    st.markdown(f"### Abono #{ab['id']}")
+    cinfo1, cinfo2, cinfo3 = st.columns(3)
+    cinfo1.write(f"**Crédito:** #{ab['credito_id']}")
+    cinfo2.write(f"**Pedido:** #{ab['pedido_id']}")
+    cinfo3.write(f"**Estado:** {ab['status']}")
+    st.caption(f"Cliente/usuario: {ab['username']} · Fecha: {ab['fecha']}")
+    st.caption(f"Método: {ab['metodo'] or 'N/A'} · Referencia: {ab['referencia'] or 'N/A'}")
+
+    if ab["comprobante_path"]:
+        st.caption(f"Comprobante: {ab['comprobante_path']}")
+
+    with st.expander("✏️ Editar datos del abono", expanded=False):
+        if ab["status"] == "Validado":
+            st.warning("Este abono ya fue validado. Para proteger la cuenta del cliente, no se editan abonos validados desde aquí.")
+        else:
+            if tipo_ab == "bcv":
+                monto_bcv_edit = st.number_input("Monto $ BCV", min_value=0.0, value=float(ab["monto_bcv"] or ab["monto_usd"] or 0), step=0.01, key=f"{key_prefix}_monto_bcv_{abono_id}")
+                tasa_bcv_edit = st.number_input("Tasa BCV usada", min_value=0.0, value=float(ab["tasa_bcv"] or get_tasa_bcv()), step=0.01, key=f"{key_prefix}_tasa_bcv_{abono_id}")
+                monto_bs_calc = monto_bcv_edit * tasa_bcv_edit
+                st.info(f"Bs esperado recalculado: {money_bs(monto_bs_calc)}")
+                monto_usd_edit = monto_bcv_edit
+                tasa_prov_edit = 0.0
+                monto_bcv_final = monto_bcv_edit
+            else:
+                monto_usd_edit = st.number_input("Monto USD abonado", min_value=0.0, value=float(ab["monto_usd"] or 0), step=0.01, key=f"{key_prefix}_monto_usd_{abono_id}")
+                tasa_prov_edit = st.number_input("Tasa proveedor usada", min_value=0.0, value=float(ab["tasa_proveedor"] if "tasa_proveedor" in ab.keys() and ab["tasa_proveedor"] else get_tasa_proveedor()), step=0.01, key=f"{key_prefix}_tasa_prov_{abono_id}")
+                monto_bs_calc = monto_usd_edit * tasa_prov_edit
+                st.info(f"Bs esperado recalculado: {money_bs(monto_bs_calc)}")
+                tasa_bcv_edit = float(ab["tasa_bcv"] or get_tasa_bcv())
+                monto_bcv_final = 0.0
+
+            metodo_edit = st.text_input("Método", value=ab["metodo"] or "", key=f"{key_prefix}_metodo_{abono_id}")
+            referencia_edit = st.text_input("Referencia", value=ab["referencia"] or "", key=f"{key_prefix}_referencia_{abono_id}")
+            notas_edit = st.text_area("Notas", value=ab["notas"] or "", key=f"{key_prefix}_notas_{abono_id}")
+
+            if st.button("💾 Guardar cambios del abono", type="primary", use_container_width=True, key=f"{key_prefix}_save_{abono_id}"):
+                q("""UPDATE abonos
+                     SET monto_usd=?, monto_bcv=?, tasa_bcv=?, tasa_proveedor=?, monto_bs=?, monto_bs_esperado=?,
+                         metodo=?, referencia=?, notas=?
+                     WHERE id=?""",
+                  (float(monto_usd_edit), float(monto_bcv_final), float(tasa_bcv_edit), float(tasa_prov_edit),
+                   float(monto_bs_calc), float(monto_bs_calc), metodo_edit, referencia_edit, notas_edit, int(abono_id)))
+                st.success("Abono actualizado.")
+                st.rerun()
+
+    c1, c2, c3 = st.columns(3)
+    if c1.button("✅ Validar / aprobar", type="primary", use_container_width=True, key=f"{key_prefix}_validar_{abono_id}"):
+        ok, msg = aplicar_abono_validado(int(abono_id), st.session_state.user["username"])
+        st.success(msg) if ok else st.warning(msg)
+        st.rerun()
+
+    if c2.button("❌ Rechazar", use_container_width=True, key=f"{key_prefix}_rechazar_{abono_id}"):
+        if ab["status"] == "Validado":
+            st.warning("No se puede rechazar un abono ya validado desde aquí.")
+        else:
+            q("UPDATE abonos SET status='Rechazado', validado_por=?, fecha_validacion=? WHERE id=?",
+              (st.session_state.user["username"], now(), int(abono_id)))
+            st.warning("Abono rechazado.")
+            st.rerun()
+
+    confirmar_del = st.checkbox("Confirmar eliminación de este abono", key=f"{key_prefix}_confirm_delete_{abono_id}")
+    if c3.button("🗑️ Eliminar", disabled=not confirmar_del, use_container_width=True, key=f"{key_prefix}_delete_{abono_id}"):
+        if ab["status"] == "Validado":
+            st.error("Por seguridad, no se elimina un abono validado desde aquí porque ya afectó el saldo del crédito.")
+        else:
+            q("DELETE FROM abonos WHERE id=?", (int(abono_id),))
+            st.success("Abono eliminado.")
+            st.rerun()
+
+def admin_centro_tareas():
+    st.title("🔔 Centro admin")
+    st.caption("Resumen de eventos y tareas pendientes del sistema.")
+
+    counts = admin_tareas_counts()
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Pagos por validar", counts["pagos"])
+    c2.metric("Pedidos pendientes", counts["pedidos"])
+    c3.metric("Créditos activos", counts["creditos"])
+
+    tab1, tab2, tab3 = st.tabs(["Pagos por validar", "Pedidos pendientes", "Créditos activos"])
+
+    with tab1:
+        abonos = q("SELECT * FROM abonos WHERE status='Pendiente de validar' ORDER BY id DESC", fetch=True)
+        if not abonos:
+            st.success("No hay pagos por validar.")
+        else:
+            st.warning(f"Tienes {len(abonos)} pago(s) por validar.")
+            df = pd.DataFrame([dict(a) for a in abonos])
+            cols = ["id","credito_id","pedido_id","username","fecha","tipo_credito","monto_usd","monto_bcv","tasa_proveedor","tasa_bcv","monto_bs_esperado","metodo","referencia","status"]
+            st.dataframe(df[[c for c in cols if c in df.columns]], use_container_width=True, hide_index=True)
+            opts = {abono_resumen_label(a): int(a["id"]) for a in abonos}
+            sel = st.selectbox("Gestionar pago", list(opts.keys()), key="centro_admin_abono_sel")
+            admin_gestionar_abono(opts[sel], key_prefix="centro_admin")
+
+    with tab2:
+        pedidos = pd.read_sql_query("""SELECT id,fecha,username,cliente_nombre,tipo_pago,metodo_pago,total_usd,status,pos_procesado
+                                       FROM pedidos
+                                       WHERE status NOT IN ('Finalizado / Pagado','Cancelado','Anulado')
+                                       AND COALESCE(status,'') NOT LIKE '%Finalizado%'
+                                       ORDER BY id DESC LIMIT 50""", get_conn())
+        if pedidos.empty:
+            st.success("No hay pedidos pendientes.")
+        else:
+            st.dataframe(pedidos, use_container_width=True, hide_index=True)
+
+    with tab3:
+        creditos = pd.read_sql_query("""SELECT id,pedido_id,username,cliente_nombre,fecha_inicio,fecha_vencimiento,
+                                               monto_usd,saldo_usd,tipo_credito,monto_bcv,saldo_bcv,status
+                                        FROM creditos
+                                        WHERE status NOT IN ('Pagado','Anulado')
+                                        AND (COALESCE(saldo_usd,0)>0 OR COALESCE(saldo_bcv,0)>0)
+                                        ORDER BY id DESC LIMIT 50""", get_conn())
+        if creditos.empty:
+            st.success("No hay créditos activos.")
+        else:
+            st.dataframe(creditos, use_container_width=True, hide_index=True)
+
+
+
 def validar_creditos():
     st.title("✅ Validar créditos / pagos")
     tab1, tab2 = st.tabs(["Créditos", "Abonos por validar"])
@@ -3521,9 +3722,15 @@ def validar_creditos():
 
                     ab = pd.read_sql_query("SELECT * FROM abonos WHERE credito_id=? ORDER BY id DESC", get_conn(), params=(cid,))
                     if not ab.empty:
-                        st.dataframe(ab[["id","fecha","tipo_credito","monto_usd","monto_bcv","tasa_bcv","monto_bs","metodo","referencia","status"]], use_container_width=True, hide_index=True)
+                        cols_credito_ab = ["id","fecha","tipo_credito","monto_usd","monto_bcv","tasa_bcv","tasa_proveedor","monto_bs_esperado","monto_bs","metodo","referencia","status"]
+                        cols_credito_ab = [c for c in cols_credito_ab if c in ab.columns]
+                        st.dataframe(ab[cols_credito_ab], use_container_width=True, hide_index=True)
+                        abonos_credito = q("SELECT * FROM abonos WHERE credito_id=? ORDER BY id DESC", (cid,), fetch=True)
+                        opts_ab_credito = {abono_resumen_label(a): int(a["id"]) for a in abonos_credito}
+                        sel_ab_credito = st.selectbox("Gestionar abono de este crédito", list(opts_ab_credito.keys()), key=f"gest_ab_credito_{cid}")
+                        admin_gestionar_abono(opts_ab_credito[sel_ab_credito], key_prefix=f"credito_{cid}")
                     else:
-                        st.dataframe(ab, use_container_width=True, hide_index=True)
+                        st.info("Este crédito todavía no tiene abonos registrados.")
 
                     confirmar = st.checkbox("Confirmar eliminación de este crédito y sus abonos", key=f"confirm_del_credito_{cid}")
                     if st.button("🗑️ Eliminar crédito", key=f"del_credito_{cid}", disabled=not confirmar, use_container_width=True):
@@ -3538,37 +3745,15 @@ def validar_creditos():
         df = pd.read_sql_query("SELECT * FROM abonos WHERE status='Pendiente de validar' ORDER BY id DESC", get_conn())
         if df.empty:
             st.success("No hay abonos pendientes.")
-            return
-        cols_abonos = ["id","credito_id","pedido_id","username","fecha","tipo_credito","monto_usd","monto_bcv","tasa_bcv","tasa_proveedor","monto_bs_esperado","monto_bs","metodo","referencia","status"]
-        cols_abonos = [c for c in cols_abonos if c in df.columns]
-        st.dataframe(df[cols_abonos], use_container_width=True, hide_index=True)
-        abono_id = st.number_input("ID abono", min_value=1, value=int(df.iloc[0]["id"]))
-        rows = q("SELECT * FROM abonos WHERE id=?", (int(abono_id),), fetch=True)
-        if rows:
-            ab = rows[0]
-            tipo_ab = str(ab["tipo_credito"] if "tipo_credito" in ab.keys() and ab["tipo_credito"] else "usd").lower()
-            if tipo_ab == "bcv":
-                st.info(f"Abono BCV: {money_usd(ab['monto_bcv'] or ab['monto_usd'])} BCV · Tasa BCV usada: {float(ab['tasa_bcv'] or 0):,.2f} · Bs esperado: {money_bs(ab['monto_bs_esperado'] or ab['monto_bs'] or 0)}")
-            else:
-                st.info(f"Abono USD: {money_usd(ab['monto_usd'])} · Tasa proveedor usada: {float(ab['tasa_proveedor'] if 'tasa_proveedor' in ab.keys() and ab['tasa_proveedor'] else 0):,.2f} · Bs esperado: {money_bs(ab['monto_bs_esperado'] or ab['monto_bs'] or 0)}")
-            st.caption(f"Método: {ab['metodo'] or 'N/A'} · Referencia: {ab['referencia'] or 'N/A'}")
-            if ab["comprobante_path"]:
-                st.caption(f"Comprobante: {ab['comprobante_path']}")
-            c1, c2, c3 = st.columns(3)
-            if c1.button("✅ Validar abono", type="primary", use_container_width=True):
-                ok, msg = aplicar_abono_validado(int(abono_id), st.session_state.user["username"])
-                st.success(msg) if ok else st.warning(msg)
-                st.rerun()
-            if c2.button("❌ Rechazar abono", use_container_width=True):
-                q("UPDATE abonos SET status='Rechazado', validado_por=?, fecha_validacion=? WHERE id=?",
-                  (st.session_state.user["username"], now(), int(abono_id)))
-                st.warning("Abono rechazado.")
-                st.rerun()
-            confirmar_ab = st.checkbox("Confirmar eliminación de abono", key=f"confirm_del_abono_{abono_id}")
-            if c3.button("🗑️ Eliminar abono", disabled=not confirmar_ab, use_container_width=True):
-                q("DELETE FROM abonos WHERE id=?", (int(abono_id),))
-                st.success("Abono eliminado.")
-                st.rerun()
+        else:
+            cols_abonos = ["id","credito_id","pedido_id","username","fecha","tipo_credito","monto_usd","monto_bcv","tasa_bcv","tasa_proveedor","monto_bs_esperado","monto_bs","metodo","referencia","status"]
+            cols_abonos = [c for c in cols_abonos if c in df.columns]
+            st.dataframe(df[cols_abonos], use_container_width=True, hide_index=True)
+
+            rows = q("SELECT * FROM abonos WHERE status='Pendiente de validar' ORDER BY id DESC", fetch=True)
+            opts = {abono_resumen_label(a): int(a["id"]) for a in rows}
+            sel = st.selectbox("Selecciona abono para gestionar", list(opts.keys()), key="validar_creditos_abono_sel")
+            admin_gestionar_abono(opts[sel], key_prefix="validar_creditos")
 
 
 def reportes():
@@ -5104,6 +5289,16 @@ with st.sidebar:
     st.title("📦 Insumos Mayor")
     st.write(f"**{user['nombre']}**")
     st.caption(f"{user['rol']} · {user['username']}")
+    if user["rol"] == "admin":
+        try:
+            _tareas = admin_tareas_counts()
+            _total_tareas = _tareas["pagos"] + _tareas["pedidos"]
+            if _total_tareas > 0:
+                st.warning(f"🔔 Tareas admin: {_total_tareas} · Pagos: {_tareas['pagos']} · Pedidos: {_tareas['pedidos']}")
+            else:
+                st.success("🔔 Sin tareas críticas.")
+        except Exception:
+            pass
     ultima_stock_sidebar = get_config("stock_auto_sync_ultima", "")
     if ultima_stock_sidebar:
         st.caption(f"📦 Stock actualizado: {ultima_stock_sidebar}")
@@ -5125,7 +5320,7 @@ with st.sidebar:
 
     opciones = ["Tienda", "Carrito", "Mis pedidos", "Mis créditos", "Mi perfil"]
     if user["rol"] == "admin":
-        opciones += ["Dashboard", "Control POS", "Rentabilidad", "Publicaciones", "Vendedores", "Productos", "Categorías", "Cotizaciones", "Usuarios", "Métodos de pago", "Validar créditos", "Reportes", "Configuración", "Respaldo"]
+        opciones += ["Centro admin", "Dashboard", "Control POS", "Rentabilidad", "Publicaciones", "Vendedores", "Productos", "Categorías", "Cotizaciones", "Usuarios", "Métodos de pago", "Validar créditos", "Reportes", "Configuración", "Respaldo"]
     elif user["rol"] == "vendedor":
         opciones += ["Publicaciones", "Vendedores"]
     elif user["rol"] == "vendedor_mercadolibre":
@@ -5162,6 +5357,8 @@ elif menu == "Mis créditos":
     mis_creditos()
 elif menu == "Mi perfil":
     mi_perfil()
+elif menu == "Centro admin":
+    admin_centro_tareas()
 elif menu == "Dashboard":
     dashboard_admin()
 elif menu == "Control POS":
