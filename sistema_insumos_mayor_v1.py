@@ -41,7 +41,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V67 Pago Contado y Packing List"
+APP_NAME = "Sistema de Insumos al Mayor V68 Limpieza Visual y Stock Manual"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -823,7 +823,7 @@ def init_db():
     add_col("abonos", "tasa_proveedor", "REAL DEFAULT 0")
     add_col("abonos", "metodo_pago_id", "INTEGER DEFAULT 0")
 
-    set_default("stock_auto_sync_minutos", "60")
+    set_default("stock_auto_sync_minutos", "0")
 
     # Categorías iniciales:
     # Se crean una sola vez. Antes se recreaban en cada arranque si el admin las borraba.
@@ -2077,14 +2077,6 @@ def resumen_presentacion_catalogo(prod, presentacion, cantidad):
 
 def formato_cantidad_pdf(item):
     import re
-    """
-    Devuelve (cant, pres) para PDF sin contaminar SKU:
-    - 1 a 11 unidades => cant = número, pres = und
-    - 12 exactas por escala docena => DOC
-    - 24 exactas => DOC x2
-    - bulto exacto => BULTO / BULTO x2
-    - cantidades mixtas como 15 unidades quedan como 15, porque no son docena cerrada.
-    """
     presentacion = str(item.get("presentacion", "unidad")).lower()
     escala = str(item.get("escala_aplicada", "")).lower()
     unidades = int(item.get("unidades_base_total", item.get("cantidad_presentacion", 1)) or 1)
@@ -5852,9 +5844,8 @@ if user is None:
     st.stop()
 
 show_feedback()
-auto_sync_stock_si_corresponde(user)
-if st.session_state.get("_auto_stock_sync_msg"):
-    st.sidebar.caption(st.session_state.get("_auto_stock_sync_msg"))
+# Stock manual: no se sincroniza automáticamente al iniciar sesión.
+# Usa el botón "Actualizar stock ahora" en el sidebar cuando quieras sincronizar WooCommerce.
 
 with st.sidebar:
     st.title("📦 Insumos Mayor")
@@ -5872,9 +5863,9 @@ with st.sidebar:
             pass
     ultima_stock_sidebar = get_config("stock_auto_sync_ultima", "")
     if ultima_stock_sidebar:
-        st.caption(f"📦 Stock actualizado: {ultima_stock_sidebar}")
+        st.caption(f"📦 Última actualización manual stock: {ultima_stock_sidebar}")
     else:
-        st.caption("📦 Stock todavía no sincronizado.")
+        st.caption("📦 Stock no sincronizado todavía. Usa Actualizar stock ahora.")
     if user["rol"] == "admin":
         if st.button("🔄 Actualizar stock ahora", use_container_width=True):
             barra = st.progress(0)
