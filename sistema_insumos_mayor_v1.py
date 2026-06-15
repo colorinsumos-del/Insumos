@@ -41,7 +41,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V68 Limpieza Visual y Stock Manual"
+APP_NAME = "Sistema de Insumos al Mayor V69 Envío ML por Rangos BCV"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -742,6 +742,9 @@ def init_db():
     set_default("instagram_empresa", "@color.insumos")
     set_default("validez_cotizacion_dias", "1")
     set_default("envio_ml_10_40_usd", "10")
+    set_default("envio_ml_3_5_bcv", "0")
+    set_default("envio_ml_5_10_bcv", "0")
+    set_default("envio_ml_10_40_bcv", "0")
     set_default("cliente_bcv_activo", "0")
     set_default("comision_mercadolibre_pct", "16")
 
@@ -1824,6 +1827,45 @@ def disponibilidad(prod):
         "resto_bulto": stock % bulto_contiene if bulto_contiene > 0 and int(prod["maneja_bulto"] or 0) else stock,
     }
 
+def sugerir_envio_detalle(peso_kg):
+    """
+    Envío ML/ENVÍO por rangos configurados en bolívares.
+    Se convierte internamente a USD equivalente usando tasa proveedor para mantener
+    compatibilidad con totales/pedidos históricos.
+    """
+    peso_kg = float(peso_kg or 0)
+    tasa = float(get_tasa_proveedor() or 0)
+    tasa_bcv = float(get_tasa_bcv() or 0)
+
+    rango = "Sin envío sugerido"
+    envio_bs = 0.0
+
+    if 3 <= peso_kg <= 5:
+        rango = "3 a 5 kg"
+        envio_bs = parse_float(get_config("envio_ml_3_5_bcv", "0"), 0)
+    elif 5 < peso_kg <= 10:
+        rango = "5 a 10 kg"
+        envio_bs = parse_float(get_config("envio_ml_5_10_bcv", "0"), 0)
+    elif 10 < peso_kg <= 40:
+        rango = "10 a 40 kg"
+        envio_bs = parse_float(get_config("envio_ml_10_40_bcv", "0"), 0)
+        if envio_bs <= 0 and tasa_bcv > 0:
+            # Compatibilidad con la configuración vieja: $10 BCV para 10 a 40 kg.
+            envio_bs = parse_float(get_config("envio_ml_10_40_usd", "10"), 10) * tasa_bcv
+    elif peso_kg > 40:
+        rango = "Más de 40 kg"
+
+    envio_usd = (envio_bs / tasa) if tasa > 0 else 0.0
+    return {
+        "peso_kg": peso_kg,
+        "rango": rango,
+        "envio_bs": float(envio_bs or 0),
+        "envio_usd": float(envio_usd or 0),
+    }
+
+def sugerir_envio(peso_kg):
+    return sugerir_envio_detalle(peso_kg)["envio_usd"]
+
 def calcular_carrito(carrito):
     tasa = get_tasa_proveedor()
     subtotal = 0.0
@@ -1833,22 +1875,19 @@ def calcular_carrito(carrito):
         subtotal += float(item.get("precio_total", 0) or 0)
         peso += float(item.get("peso_total_kg", 0) or 0)
         unidades_total += int(item.get("unidades_base_total", 0) or 0)
-    envio = sugerir_envio(peso)
+
+    envio_detalle = sugerir_envio_detalle(peso)
+    envio = float(envio_detalle["envio_usd"] or 0)
     return {
         "subtotal": subtotal,
         "peso_total_kg": peso,
         "unidades_total": unidades_total,
         "envio": envio,
+        "envio_bs": float(envio_detalle["envio_bs"] or 0),
+        "envio_rango": envio_detalle["rango"],
         "total": subtotal + envio,
         "total_bs": (subtotal + envio) * tasa,
     }
-
-def sugerir_envio(peso_kg):
-    # Regla inicial: por encima de 10kg hasta 40kg = $10.
-    costo = parse_float(get_config("envio_ml_10_40_usd", "10"), 10)
-    if peso_kg > 10 and peso_kg <= 40:
-        return costo
-    return 0.0
 
 
 def cliente_usa_ml_envio(user):
@@ -2612,16 +2651,23 @@ def admin_config():
         tel = st.text_input("Teléfono", value=get_config("telefono_empresa", "04127757053"))
         ig = st.text_input("Instagram", value=get_config("instagram_empresa", "@color.insumos"))
         validez = st.number_input("Validez cotización en días", min_value=1, max_value=30, value=int(parse_float(get_config("validez_cotizacion_dias", "1"), 1)))
-        envio = st.number_input("Envío sugerido MercadoLibre >10kg hasta 40kg", min_value=0.0, value=parse_float(get_config("envio_ml_10_40_usd", "10"), 10), step=0.5)
         comision_ml = st.number_input("% comisión MercadoLibre", min_value=0.0, max_value=80.0, value=get_comision_ml_pct(), step=0.5)
+
+        st.markdown("#### Envío ML / ENVÍO por rangos")
+        st.caption("Estos montos se cargan en bolívares. El sistema los convierte internamente a USD equivalente usando tasa proveedor para mantener el pedido cuadrado.")
+        envio_3_5_bcv = st.number_input("Envío Bs rango 3 a 5 kg", min_value=0.0, value=parse_float(get_config("envio_ml_3_5_bcv", "0"), 0), step=100.0)
+        envio_5_10_bcv = st.number_input("Envío Bs rango 5 a 10 kg", min_value=0.0, value=parse_float(get_config("envio_ml_5_10_bcv", "0"), 0), step=100.0)
+        envio_10_40_bcv = st.number_input("Envío Bs rango 10 a 40 kg", min_value=0.0, value=parse_float(get_config("envio_ml_10_40_bcv", "0"), 0), step=100.0)
+
         if st.button("💾 Guardar configuración", type="primary", key="save_empresa"):
             set_config("nombre_empresa", nombre)
             set_config("telefono_empresa", tel)
             set_config("instagram_empresa", ig)
             set_config("validez_cotizacion_dias", validez)
-            set_config("envio_ml_10_40_usd", envio)
+            set_config("envio_ml_3_5_bcv", envio_3_5_bcv)
+            set_config("envio_ml_5_10_bcv", envio_5_10_bcv)
+            set_config("envio_ml_10_40_bcv", envio_10_40_bcv)
             set_config("comision_mercadolibre_pct", comision_ml)
-            set_config("stock_auto_sync_minutos", stock_auto_sync_minutos)
             st.success("Configuración guardada.")
 
     st.markdown("---")
@@ -2636,7 +2682,8 @@ def admin_config():
         st.success(f"Sincronizados: {ok}. No sincronizados: {no}.")
         if errors:
             st.warning("Algunos errores:")
-            st.code("\n".join(errors))
+            st.code("\\n".join(errors))
+
 
 def admin_categorias():
     st.title("🗂️ Categorías")
@@ -3453,7 +3500,17 @@ def mis_pedidos():
                         items_edit[k] = nuevo_item
 
                 cenv, cmet = st.columns(2)
-                envio_edit = cenv.number_input("Envío USD", min_value=0.0, value=float(p["envio_usd"] or 0), step=0.5)
+                tasa_envio_edit = float(p["tasa_proveedor"] or get_tasa_proveedor() or 0)
+                envio_bs_actual = float(p["envio_usd"] or 0) * tasa_envio_edit
+                envio_bs_edit = cenv.number_input(
+                    "Envío Bs",
+                    min_value=0.0,
+                    value=float(envio_bs_actual or 0),
+                    step=100.0,
+                    help="Editable. Se convierte internamente a USD equivalente para recalcular el pedido."
+                )
+                envio_edit = (float(envio_bs_edit or 0) / tasa_envio_edit) if tasa_envio_edit > 0 else 0.0
+                cenv.caption(f"Equiv. interno: {money_usd(envio_edit)} · Tasa pedido: {tasa_envio_edit:,.2f}")
                 metodo_edit = cmet.selectbox(
                     "Método de pago",
                     ["Por confirmar", "Divisas", "Transferencia", "Pago móvil", "Zelle", "Zinli", "Binance", "Otro"],
@@ -5379,17 +5436,18 @@ def carrito_view():
     st.markdown('<div class="total-box">', unsafe_allow_html=True)
     st.markdown(f"### Subtotal productos: {money_usd(t['subtotal'])}")
     st.markdown(f"### Total Bs proveedor: {money_bs(t['subtotal'] * tasa)}")
-    envio_sugerido_usuario = t["envio"] if cliente_usa_ml_envio(user) else 0.0
+    envio_sugerido_usuario = t["envio"] if cliente_usa_ml_envio(cliente_precio_carrito) else 0.0
     if user["rol"] == "admin":
         st.markdown('<div class="admin-only">', unsafe_allow_html=True)
         st.markdown("**Vista interna admin**")
         st.write(f"Peso total estimado: **{t['peso_total_kg']:.2f} kg**")
-        if cliente_usa_ml_envio(user):
-            st.write(f"Envío sugerido ML / ENVÍO: **{money_usd(envio_sugerido_usuario)}**")
+        if cliente_usa_ml_envio(cliente_precio_carrito):
+            st.write(f"Rango envío ML / ENVÍO: **{t.get('envio_rango','N/A')}**")
+            st.write(f"Envío sugerido: **{money_bs(t.get('envio_bs',0))}** ({money_usd(envio_sugerido_usuario)} equiv.)")
             st.write(f"Total con envío sugerido: **{money_usd(t['subtotal'] + envio_sugerido_usuario)}**")
         else:
             st.write("Envío sugerido: **No aplica**")
-            st.caption("Este usuario no tiene activa la casilla ML / ENVÍO.")
+            st.caption("Este cliente no tiene activa la casilla ML / ENVÍO.")
         st.caption("El peso y la regla de envío no son visibles para el comprador.")
         st.markdown("</div>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
@@ -5515,13 +5573,24 @@ def carrito_view():
         )
 
     if cliente_usa_ml_envio(cliente_pedido):
-        envio_pedido = st.number_input(
-            "Envío a cobrar USD",
-            min_value=0.0,
-            value=float(t["envio"]),
-            step=0.5,
-            key="envio_pedido_procesar"
+        envio_detalle_pedido = sugerir_envio_detalle(t["peso_total_kg"])
+        st.markdown("#### Envío ML / ENVÍO")
+        st.caption(
+            f"Peso estimado: {t['peso_total_kg']:.2f} kg · "
+            f"Rango aplicado: {envio_detalle_pedido['rango']} · "
+            f"Sugerido: {money_bs(envio_detalle_pedido['envio_bs'])}"
         )
+        envio_bs_pedido = st.number_input(
+            "Envío a cobrar Bs",
+            min_value=0.0,
+            value=float(envio_detalle_pedido["envio_bs"] or 0),
+            step=100.0,
+            key="envio_bs_pedido_procesar",
+            help="Puedes editar este monto antes de crear el pedido si el envío real cambia."
+        )
+        tasa_envio_pedido = get_tasa_proveedor()
+        envio_pedido = (float(envio_bs_pedido or 0) / tasa_envio_pedido) if tasa_envio_pedido > 0 else 0.0
+        st.caption(f"Equivalente interno: {money_usd(envio_pedido)} a tasa proveedor {tasa_envio_pedido:,.2f}")
     else:
         envio_pedido = 0.0
         st.caption("Este cliente no tiene activa la casilla ML / ENVÍO, por eso no se muestra cobro de envío.")
