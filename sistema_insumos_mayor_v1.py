@@ -41,7 +41,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V70 Peso Precisión Gramos"
+APP_NAME = "Sistema de Insumos al Mayor V71 POS Separado y Feedback Pagos"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -825,6 +825,14 @@ def init_db():
     add_col("abonos", "monto_bs_esperado", "REAL DEFAULT 0")
     add_col("abonos", "tasa_proveedor", "REAL DEFAULT 0")
     add_col("abonos", "metodo_pago_id", "INTEGER DEFAULT 0")
+
+    # V71: separar POS del estado comercial y normalizar créditos activos.
+    try:
+        q("UPDATE creditos SET status='En curso' WHERE status='Pendiente'")
+        q("UPDATE pedidos SET status='Crédito en curso' WHERE status='Crédito / Pendiente de pago'")
+        q("UPDATE pedidos SET status='Confirmado' WHERE status='Procesado en POS'")
+    except Exception:
+        pass
 
     set_default("stock_auto_sync_minutos", "0")
 
@@ -1655,7 +1663,7 @@ def crear_pedido_desde_carrito(user, carrito, tipo_pago, metodo_pago, envio_usd,
       (now(), username, cliente_nombre, cliente_rif, cliente_tel, cliente_dir, json.dumps(carrito, ensure_ascii=False),
        tipo_pago, metodo_pago, subtotal, float(envio_usd or 0), total, tasa, tasa_bcv,
        total_bs_base, t["peso_total_kg"],
-       "Crédito / Pendiente de pago" if tipo_pago == "credito" else "Pendiente de pago",
+       "Crédito en curso" if tipo_pago == "credito" else "Pendiente de pago",
        notas, credito_tipo, total_bcv_credito, pedido_token))
     pedido_id = q("SELECT last_insert_rowid() AS id", fetch=True)[0]["id"]
 
@@ -1674,7 +1682,7 @@ def crear_pedido_desde_carrito(user, carrito, tipo_pago, metodo_pago, envio_usd,
                   tipo_credito, tasa_bcv_creacion, monto_bcv, saldo_bcv, total_bs_base)
                  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
               (pedido_id, username, cliente_nombre, now(), venc,
-               total_bcv_credito, total_bcv_credito, tasa, "Pendiente", nota_credito,
+               total_bcv_credito, total_bcv_credito, tasa, "En curso", nota_credito,
                "bcv", tasa_bcv, total_bcv_credito, total_bcv_credito, total_bs_base))
         else:
             q("""INSERT INTO creditos
@@ -1683,10 +1691,10 @@ def crear_pedido_desde_carrito(user, carrito, tipo_pago, metodo_pago, envio_usd,
                   tipo_credito, tasa_bcv_creacion, monto_bcv, saldo_bcv, total_bs_base)
                  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
               (pedido_id, username, cliente_nombre, now(), venc,
-               total, total, tasa, "Pendiente", "Crédito creado desde pedido.",
+               total, total, tasa, "En curso", "Crédito creado desde pedido.",
                "usd", tasa_bcv, 0, 0, total_bs_base))
         credito_id = q("SELECT last_insert_rowid() AS id", fetch=True)[0]["id"]
-        q("UPDATE pedidos SET credito_id=?, status='Crédito / Pendiente de pago' WHERE id=?", (credito_id, pedido_id))
+        q("UPDATE pedidos SET credito_id=?, status='Crédito en curso' WHERE id=?", (credito_id, pedido_id))
     else:
         q("UPDATE pedidos SET status='Pendiente de pago' WHERE id=?", (pedido_id,))
 
@@ -1728,7 +1736,7 @@ def aplicar_abono_validado(abono_id, admin_username):
         if nuevo_status == "Pagado":
             q("UPDATE pedidos SET status='Finalizado / Pagado' WHERE id=?", (cr["pedido_id"],))
         else:
-            q("UPDATE pedidos SET status='Crédito / Pendiente de pago' WHERE id=?", (cr["pedido_id"],))
+            q("UPDATE pedidos SET status='Crédito en curso' WHERE id=?", (cr["pedido_id"],))
         return True, f"Abono BCV validado. Saldo actual: {money_usd(nuevo_saldo_bcv)} BCV"
 
     nuevo_saldo = max(0.0, float(cr["saldo_usd"] or 0) - float(ab["monto_usd"] or 0))
@@ -1739,7 +1747,7 @@ def aplicar_abono_validado(abono_id, admin_username):
     if nuevo_status == "Pagado":
         q("UPDATE pedidos SET status='Finalizado / Pagado' WHERE id=?", (cr["pedido_id"],))
     else:
-        q("UPDATE pedidos SET status='Crédito / Pendiente de pago' WHERE id=?", (cr["pedido_id"],))
+        q("UPDATE pedidos SET status='Crédito en curso' WHERE id=?", (cr["pedido_id"],))
     return True, f"Abono validado. Saldo actual: {money_usd(nuevo_saldo)}"
 
 
@@ -3433,14 +3441,15 @@ def mis_pedidos():
         st.dataframe(items_df, use_container_width=True, hide_index=True,
                      column_config={"Subtotal USD": st.column_config.NumberColumn(format="$%.2f")})
 
-    estados = ["Pendiente", "Pendiente de pago/entrega", "Crédito pendiente", "Crédito parcial", "Pago por validar",
-               "Confirmado", "Preparando", "Listo para entregar", "Entregado", "Finalizado / Pagado",
-               "Procesado en POS", "Cancelado", "Anulado"]
+    estados = ["Pendiente", "Pendiente de pago", "Pago por validar", "Confirmado", "Preparando", "Listo para entregar",
+               "Entregado", "Crédito en curso", "Finalizado / Pagado", "Cancelado", "Anulado"]
 
     c1, c2, c3 = st.columns(3)
     with c1:
         pdf = generar_pdf_pedido(int(pid))
+        packing_pdf = generar_pdf_packing_list_pedido(int(pid))
         st.download_button("📄 Descargar PDF", data=pdf, file_name=f"pedido_{int(pid):04d}.pdf", mime="application/pdf", use_container_width=True)
+        st.download_button("📦 Descargar Packing List", data=packing_pdf, file_name=f"packing_list_{int(pid):04d}.pdf", mime="application/pdf", use_container_width=True)
 
     if user["rol"] == "admin":
         with c2:
@@ -3881,7 +3890,7 @@ def mis_creditos():
                      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                   (cr["id"], cr["pedido_id"], cr["username"], now(), monto, monto_bs, metodo_nombre, ref, path, "Pendiente de validar", notas,
                    "usd", 0, get_tasa_bcv(), tasa_actual, monto_bs, metodo_id))
-            st.success("Pago cargado. Queda pendiente de validación.")
+            set_feedback("Pago notificado correctamente. Queda en proceso de verificación por el admin.", "success")
             st.rerun()
 
     if st.button("📄 Descargar estado de cuenta", use_container_width=True):
@@ -3897,17 +3906,23 @@ def admin_tareas_counts():
         pagos = 0
     try:
         pedidos = q("""SELECT COUNT(*) AS n FROM pedidos
-                       WHERE status NOT IN ('Finalizado / Pagado','Cancelado','Anulado')
-                       AND COALESCE(status,'') NOT LIKE '%Finalizado%'""", fetch=True)[0]["n"]
+                       WHERE COALESCE(status,'') IN ('Pendiente','Pendiente de pago','Pendiente de pago/entrega','Pago por validar','Confirmado','Preparando','Listo para entregar','Crédito en curso')""", fetch=True)[0]["n"]
     except Exception:
         pedidos = 0
+    try:
+        pos = q("""SELECT COUNT(*) AS n FROM pedidos
+                   WHERE COALESCE(pos_procesado,0)=0
+                   AND COALESCE(status,'') NOT IN ('Cancelado','Anulado')""", fetch=True)[0]["n"]
+    except Exception:
+        pos = 0
     try:
         creditos = q("""SELECT COUNT(*) AS n FROM creditos
                         WHERE status NOT IN ('Pagado','Anulado')
                         AND (COALESCE(saldo_usd,0)>0 OR COALESCE(saldo_bcv,0)>0)""", fetch=True)[0]["n"]
     except Exception:
         creditos = 0
-    return {"pagos": int(pagos or 0), "pedidos": int(pedidos or 0), "creditos": int(creditos or 0)}
+    return {"pagos": int(pagos or 0), "pedidos": int(pedidos or 0), "pos": int(pos or 0), "creditos": int(creditos or 0)}
+
 
 def abono_resumen_label(ab):
     tipo = str(ab["tipo_credito"] if "tipo_credito" in ab.keys() and ab["tipo_credito"] else "usd").lower()
@@ -4028,9 +4043,8 @@ def admin_panel_pedido(pedido_id, key_prefix="pedido_admin"):
     dp2.download_button("📦 Descargar Packing List", data=packing_pdf, file_name=f"packing_list_{int(pedido_id):04d}.pdf",
                        mime="application/pdf", use_container_width=True, key=f"{key_prefix}_packing_{pedido_id}")
 
-    estados = ["Pendiente", "Pendiente de pago/entrega", "Crédito pendiente", "Crédito parcial", "Pago por validar",
-               "Confirmado", "Preparando", "Listo para entregar", "Entregado", "Finalizado / Pagado",
-               "Procesado en POS", "Cancelado", "Anulado"]
+    estados = ["Pendiente", "Pendiente de pago", "Pago por validar", "Confirmado", "Preparando", "Listo para entregar",
+               "Entregado", "Crédito en curso", "Finalizado / Pagado", "Cancelado", "Anulado"]
 
     st.markdown("#### Acciones del pedido")
     a1, a2 = st.columns(2)
@@ -4056,14 +4070,14 @@ def admin_panel_pedido(pedido_id, key_prefix="pedido_admin"):
             notas_pos = st.text_area("Notas POS", key=f"{key_prefix}_notas_pos_{pedido_id}")
             confirmar_pos = st.checkbox("Confirmar procesado en POS", key=f"{key_prefix}_confirm_pos_{pedido_id}")
             if st.button("✅ Marcar procesado en POS", disabled=not confirmar_pos, use_container_width=True, key=f"{key_prefix}_pos_{pedido_id}"):
-                q("""UPDATE pedidos SET pos_procesado=1, pos_fecha=?, pos_usuario=?, pos_notas=?, status='Procesado en POS' WHERE id=?""",
+                q("""UPDATE pedidos SET pos_procesado=1, pos_fecha=?, pos_usuario=?, pos_notas=? WHERE id=?""",
                   (now(), st.session_state.user["username"], notas_pos, int(pedido_id)))
                 st.success("Pedido marcado como procesado en POS.")
                 st.rerun()
         else:
             confirmar_reverso = st.checkbox("Confirmar reverso POS", key=f"{key_prefix}_confirm_reverso_pos_{pedido_id}")
             if st.button("↩️ Volver a pendiente POS", disabled=not confirmar_reverso, use_container_width=True, key=f"{key_prefix}_reverso_pos_{pedido_id}"):
-                q("UPDATE pedidos SET pos_procesado=0, pos_fecha=NULL, pos_usuario=NULL, pos_notas=NULL, status='Confirmado' WHERE id=?", (int(pedido_id),))
+                q("UPDATE pedidos SET pos_procesado=0, pos_fecha=NULL, pos_usuario=NULL, pos_notas=NULL WHERE id=?", (int(pedido_id),))
                 st.warning("Pedido devuelto a pendiente POS.")
                 st.rerun()
 
@@ -4091,22 +4105,23 @@ def admin_panel_pedido(pedido_id, key_prefix="pedido_admin"):
 
 def admin_centro_tareas():
     st.title("🔔 Centro admin")
-    st.caption("Resumen de eventos y tareas pendientes del sistema.")
+    st.caption("Resumen de eventos y tareas pendientes del sistema. POS es solo control interno y no cambia el estado comercial del pedido.")
 
     counts = admin_tareas_counts()
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Pagos por validar", counts["pagos"])
-    c2.metric("Pedidos pendientes", counts["pedidos"])
-    c3.metric("Créditos activos", counts["creditos"])
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Pagos por verificar", counts["pagos"])
+    c2.metric("Pedidos por atender", counts["pedidos"])
+    c3.metric("POS pendiente", counts["pos"])
+    c4.metric("Créditos en curso", counts["creditos"])
 
-    tab1, tab2, tab3 = st.tabs(["Pagos por validar", "Pedidos pendientes", "Créditos activos"])
+    tab1, tab2, tab_pos, tab3 = st.tabs(["Pagos por verificar", "Pedidos por atender", "POS pendiente", "Créditos en curso"])
 
     with tab1:
         abonos = q("SELECT * FROM abonos WHERE status='Pendiente de validar' ORDER BY id DESC", fetch=True)
         if not abonos:
-            st.success("No hay pagos por validar.")
+            st.success("No hay pagos por verificar.")
         else:
-            st.warning(f"Tienes {len(abonos)} pago(s) por validar.")
+            st.warning(f"Tienes {len(abonos)} pago(s) por verificar.")
             df = pd.DataFrame([dict(a) for a in abonos])
             cols = ["id","credito_id","pedido_id","username","fecha","tipo_credito","monto_usd","monto_bcv","tasa_proveedor","tasa_bcv","monto_bs_esperado","metodo","referencia","status"]
             st.dataframe(df[[c for c in cols if c in df.columns]], use_container_width=True, hide_index=True)
@@ -4117,11 +4132,10 @@ def admin_centro_tareas():
     with tab2:
         pedidos = pd.read_sql_query("""SELECT id,fecha,username,cliente_nombre,tipo_pago,metodo_pago,total_usd,status,pos_procesado
                                        FROM pedidos
-                                       WHERE status NOT IN ('Finalizado / Pagado','Cancelado','Anulado')
-                                       AND COALESCE(status,'') NOT LIKE '%Finalizado%'
-                                       ORDER BY id DESC LIMIT 50""", get_conn())
+                                       WHERE COALESCE(status,'') IN ('Pendiente','Pendiente de pago','Pendiente de pago/entrega','Pago por validar','Confirmado','Preparando','Listo para entregar','Crédito en curso')
+                                       ORDER BY id DESC LIMIT 80""", get_conn())
         if pedidos.empty:
-            st.success("No hay pedidos pendientes.")
+            st.success("No hay pedidos por atender.")
         else:
             st.dataframe(pedidos, use_container_width=True, hide_index=True,
                          column_config={"total_usd": st.column_config.NumberColumn(format="$%.2f")})
@@ -4132,15 +4146,34 @@ def admin_centro_tareas():
             sel_ped = st.selectbox("Gestionar pedido", list(opts_ped.keys()), key="centro_admin_pedido_sel")
             admin_panel_pedido(opts_ped[sel_ped], key_prefix="centro_admin_pedido")
 
+    with tab_pos:
+        pedidos_pos = pd.read_sql_query("""SELECT id,fecha,username,cliente_nombre,tipo_pago,metodo_pago,total_usd,status,pos_procesado
+                                           FROM pedidos
+                                           WHERE COALESCE(pos_procesado,0)=0
+                                           AND COALESCE(status,'') NOT IN ('Cancelado','Anulado')
+                                           ORDER BY id DESC LIMIT 80""", get_conn())
+        if pedidos_pos.empty:
+            st.success("No hay pedidos pendientes por POS.")
+        else:
+            st.caption("Marcar POS no cambia el estado del pedido ni del crédito. Solo sirve como indicativo interno de Color Insumos.")
+            st.dataframe(pedidos_pos, use_container_width=True, hide_index=True,
+                         column_config={"total_usd": st.column_config.NumberColumn(format="$%.2f")})
+            opts_pos = {
+                f"#{int(r['id'])} · {r['cliente_nombre']} · {money_usd(r['total_usd'])} · Estado: {r['status']}": int(r["id"])
+                for _, r in pedidos_pos.iterrows()
+            }
+            sel_pos = st.selectbox("Gestionar POS del pedido", list(opts_pos.keys()), key="centro_admin_pos_sel")
+            admin_panel_pedido(opts_pos[sel_pos], key_prefix="centro_admin_pos")
+
     with tab3:
         creditos = pd.read_sql_query("""SELECT id,pedido_id,username,cliente_nombre,fecha_inicio,fecha_vencimiento,
                                                monto_usd,saldo_usd,tipo_credito,monto_bcv,saldo_bcv,status
                                         FROM creditos
                                         WHERE status NOT IN ('Pagado','Anulado')
                                         AND (COALESCE(saldo_usd,0)>0 OR COALESCE(saldo_bcv,0)>0)
-                                        ORDER BY id DESC LIMIT 50""", get_conn())
+                                        ORDER BY id DESC LIMIT 80""", get_conn())
         if creditos.empty:
-            st.success("No hay créditos activos.")
+            st.success("No hay créditos en curso.")
         else:
             st.dataframe(creditos, use_container_width=True, hide_index=True)
 
@@ -4164,7 +4197,7 @@ def validar_creditos():
                     c1.write(f"Pedido: #{cr['pedido_id']}")
                     c2.write(f"Monto: {money_usd(cr.get('monto_bcv') or cr.get('monto_usd') or 0)} BCV" if tipo_cr_txt == "BCV" else f"Monto: {money_usd(cr['monto_usd'])}")
                     c3.write(f"Vence: {cr['fecha_vencimiento']}")
-                    estados = ["Pendiente", "Parcial", "Pagado", "Vencido", "Anulado"]
+                    estados = ["En curso", "Parcial", "Pagado", "Vencido", "Anulado"]
                     idx = estados.index(cr["status"]) if cr["status"] in estados else 0
                     nuevo = st.selectbox("Estado crédito", estados, index=idx, key=f"estado_credito_{cid}")
                     if nuevo != cr["status"]:
@@ -4562,7 +4595,7 @@ def control_pos():
                 confirmar = st.checkbox("Confirmo que este pedido ya fue sacado/procesado en el POS")
                 notas = st.text_area("Notas POS", key=f"notas_pos_{pid}")
                 if st.button("✅ Marcar como procesado en POS", type="primary", disabled=not confirmar, use_container_width=True):
-                    q("""UPDATE pedidos SET pos_procesado=1, pos_fecha=?, pos_usuario=?, pos_notas=?, status='Procesado en POS' WHERE id=?""",
+                    q("""UPDATE pedidos SET pos_procesado=1, pos_fecha=?, pos_usuario=?, pos_notas=? WHERE id=?""",
                       (now(), st.session_state.user["username"], notas, int(pid)))
                     st.success("Pedido marcado como procesado en POS.")
                     st.rerun()
@@ -4577,7 +4610,7 @@ def control_pos():
             pid2 = st.selectbox("Seleccionar procesado", df2["id"].astype(int).tolist(), format_func=lambda x: f"Pedido #{x}", key="pos_proc")
             confirmar2 = st.checkbox("Confirmar reverso POS")
             if st.button("↩️ Marcar como pendiente en POS", disabled=not confirmar2, use_container_width=True):
-                q("UPDATE pedidos SET pos_procesado=0, pos_fecha=NULL, pos_usuario=NULL, pos_notas=NULL, status='Confirmado' WHERE id=?", (int(pid2),))
+                q("UPDATE pedidos SET pos_procesado=0, pos_fecha=NULL, pos_usuario=NULL, pos_notas=NULL WHERE id=?", (int(pid2),))
                 st.warning("Pedido devuelto a pendiente POS.")
                 st.rerun()
 
@@ -5256,7 +5289,7 @@ def tienda():
 
 def pedido_permite_edicion(pedido):
     status = str(pedido["status"] or "").lower()
-    bloqueados = ["finalizado", "pagado", "procesado en pos", "cancelado", "anulado"]
+    bloqueados = ["finalizado", "pagado", "cancelado", "anulado"]
     return not any(b in status for b in bloqueados)
 
 def cliente_resumen_para_pedido(username):
@@ -5775,7 +5808,7 @@ def carrito_view():
                             notas=pago_contado_notas,
                             metodo_pago_id=pago_contado_metodo_id
                         )
-                        st.info("Pago contado notificado. Queda pendiente de validación del admin.")
+                        st.info("Pago contado notificado correctamente. Queda en proceso de verificación por el admin.")
 
                     st.success(f"{msg} Pedido #{pid}.")
                     pdf = generar_pdf_pedido(pid)
@@ -5937,9 +5970,9 @@ with st.sidebar:
     if user["rol"] == "admin":
         try:
             _tareas = admin_tareas_counts()
-            _total_tareas = _tareas["pagos"] + _tareas["pedidos"]
+            _total_tareas = _tareas["pagos"] + _tareas["pedidos"] + _tareas.get("pos", 0)
             if _total_tareas > 0:
-                st.warning(f"🔔 Tareas admin: {_total_tareas} · Pagos: {_tareas['pagos']} · Pedidos: {_tareas['pedidos']}")
+                st.warning(f"🔔 Tareas admin: {_total_tareas} · Pagos: {_tareas['pagos']} · Pedidos: {_tareas['pedidos']} · POS: {_tareas.get('pos',0)}")
             else:
                 st.success("🔔 Sin tareas críticas.")
         except Exception:
