@@ -41,7 +41,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V69 Envío ML por Rangos BCV"
+APP_NAME = "Sistema de Insumos al Mayor V70 Peso Precisión Gramos"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -2746,8 +2746,15 @@ def admin_productos():
             params.extend([f"%{bus}%", f"%{bus}%"])
         sql += " ORDER BY p.activo DESC, c.orden, p.descripcion"
         df = pd.read_sql_query(sql, get_conn(), params=params)
-        cols_prod = ["sku","descripcion","categoria","precio_unidad","presentacion_intermedia_nombre","presentacion_intermedia_cantidad","precio_docena","precio_bulto","maneja_precio_especial","precio_especial_unidad","precio_especial_docena","precio_especial_bulto","bulto_contiene","wc_stock","activo","ultima_sync"]
-        st.dataframe(df[cols_prod], use_container_width=True, hide_index=True)
+        cols_prod = ["sku","descripcion","categoria","precio_unidad","presentacion_intermedia_nombre","presentacion_intermedia_cantidad","precio_docena","precio_bulto","maneja_precio_especial","precio_especial_unidad","precio_especial_docena","precio_especial_bulto","bulto_contiene","peso_unidad_kg","wc_stock","activo","ultima_sync"]
+        st.dataframe(
+            df[cols_prod],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "peso_unidad_kg": st.column_config.NumberColumn("peso_unidad_kg", format="%.4f kg")
+            }
+        )
 
         if not df.empty:
             st.markdown("#### Acciones rápidas del producto")
@@ -2840,7 +2847,14 @@ def admin_productos():
             bulto_contiene = c8.number_input("Bulto contiene unidades base", min_value=1, max_value=9999, value=int(prod["bulto_contiene"] if prod and prod["bulto_contiene"] else 1), step=1)
 
             c10, c11 = st.columns(2)
-            peso = c10.number_input("Peso por unidad base KG (interno admin)", min_value=0.0, value=float(prod["peso_unidad_kg"] if prod else 0), step=0.01)
+            peso = c10.number_input(
+                "Peso por unidad base KG (interno admin)",
+                min_value=0.0,
+                value=float(prod["peso_unidad_kg"] if prod else 0),
+                step=0.0001,
+                format="%.4f",
+                help="Se carga en kg. Ejemplo: 1.6 gramos = 0.0016 kg. 10 gramos = 0.0100 kg."
+            )
             activo = c11.checkbox("Producto activo", value=bool(prod["activo"]) if prod else True)
 
             st.markdown("#### Costos internos / rentabilidad")
