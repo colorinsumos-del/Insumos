@@ -41,7 +41,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V72 Feedback Pago Local"
+APP_NAME = "Sistema de Insumos al Mayor V73 Historial de Pagos Cliente"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -3363,6 +3363,69 @@ def dashboard_admin():
             st.dataframe(df_alertas, use_container_width=True, hide_index=True)
 
 
+def pagos_rows_para_usuario(username):
+    rows = q("""SELECT a.*, p.cliente_nombre, p.total_usd AS pedido_total_usd, p.status AS pedido_status
+                FROM abonos a
+                LEFT JOIN pedidos p ON p.id = a.pedido_id
+                WHERE a.username=?
+                ORDER BY a.id DESC""", (username,), fetch=True)
+    data = []
+    for a in rows:
+        tipo = str(a["tipo_credito"] if "tipo_credito" in a.keys() and a["tipo_credito"] else "usd").lower()
+        credito_id = int(a["credito_id"] or 0)
+        origen = "Pago contado" if credito_id <= 0 or tipo == "contado" else f"Crédito #{credito_id}"
+        monto_txt = f"{money_usd(a['monto_bcv'] or a['monto_usd'])} BCV" if tipo == "bcv" else money_usd(a["monto_usd"])
+        tasa_txt = ""
+        if tipo == "bcv":
+            tasa_txt = f"BCV {float(a['tasa_bcv'] or 0):,.2f}"
+        elif tipo in ["usd", "contado"]:
+            tasa_txt = f"Proveedor {float(a['tasa_proveedor'] if 'tasa_proveedor' in a.keys() and a['tasa_proveedor'] else 0):,.2f}"
+        data.append({
+            "id": int(a["id"]),
+            "fecha": a["fecha"],
+            "pedido_id": int(a["pedido_id"] or 0),
+            "origen": origen,
+            "tipo": tipo.upper(),
+            "monto": monto_txt,
+            "Bs esperado": money_bs(a["monto_bs_esperado"] if "monto_bs_esperado" in a.keys() and a["monto_bs_esperado"] else a["monto_bs"] or 0),
+            "tasa usada": tasa_txt,
+            "método": a["metodo"] or "",
+            "referencia": a["referencia"] or "",
+            "status": a["status"],
+            "notas": a["notas"] or "",
+        })
+    return data
+
+def mostrar_historial_pagos_cliente(username, titulo="Mis pagos notificados"):
+    st.subheader(titulo)
+    data = pagos_rows_para_usuario(username)
+    if not data:
+        st.info("Todavía no tienes pagos o abonos notificados.")
+        return
+
+    df = pd.DataFrame(data)
+    pendientes = df[df["status"].astype(str) == "Pendiente de validar"]
+    validados = df[df["status"].astype(str) == "Validado"]
+    rechazados = df[df["status"].astype(str) == "Rechazado"]
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("En verificación", len(pendientes))
+    c2.metric("Validados", len(validados))
+    c3.metric("Rechazados", len(rechazados))
+
+    if not pendientes.empty:
+        st.warning("Pagos en proceso de verificación")
+        st.dataframe(pendientes.drop(columns=["notas"], errors="ignore"), use_container_width=True, hide_index=True)
+
+    with st.expander("Ver histórico completo de pagos", expanded=False):
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+def mis_pagos():
+    st.title("💵 Mis pagos")
+    user = get_user(st.session_state.user["username"])
+    mostrar_historial_pagos_cliente(user["username"], titulo="Historial de pagos y abonos")
+
+
 def mis_pedidos():
     st.title("🧾 Pedidos / Gestor de órdenes")
     user = get_user(st.session_state.user["username"])
@@ -3440,6 +3503,27 @@ def mis_pedidos():
         st.subheader("Items del pedido")
         st.dataframe(items_df, use_container_width=True, hide_index=True,
                      column_config={"Subtotal USD": st.column_config.NumberColumn(format="$%.2f")})
+
+    pagos_pedido = q("SELECT * FROM abonos WHERE pedido_id=? ORDER BY id DESC", (int(pid),), fetch=True)
+    st.subheader("Pagos / abonos del pedido")
+    if pagos_pedido:
+        data_pagos_pedido = []
+        for abp in pagos_pedido:
+            tipo_abp = str(abp["tipo_credito"] if "tipo_credito" in abp.keys() and abp["tipo_credito"] else "usd").lower()
+            monto_txt = f"{money_usd(abp['monto_bcv'] or abp['monto_usd'])} BCV" if tipo_abp == "bcv" else money_usd(abp["monto_usd"])
+            data_pagos_pedido.append({
+                "id": int(abp["id"]),
+                "fecha": abp["fecha"],
+                "tipo": tipo_abp.upper(),
+                "monto": monto_txt,
+                "Bs esperado": money_bs(abp["monto_bs_esperado"] if "monto_bs_esperado" in abp.keys() and abp["monto_bs_esperado"] else abp["monto_bs"] or 0),
+                "método": abp["metodo"] or "",
+                "referencia": abp["referencia"] or "",
+                "status": abp["status"],
+            })
+        st.dataframe(pd.DataFrame(data_pagos_pedido), use_container_width=True, hide_index=True)
+    else:
+        st.info("Este pedido todavía no tiene pagos o abonos notificados.")
 
     estados = ["Pendiente", "Pendiente de pago", "Pago por validar", "Confirmado", "Preparando", "Listo para entregar",
                "Entregado", "Crédito en curso", "Finalizado / Pagado", "Cancelado", "Anulado"]
@@ -3892,6 +3976,9 @@ def mis_creditos():
                    "usd", 0, get_tasa_bcv(), tasa_actual, monto_bs, metodo_id))
             st.session_state["_pago_credito_feedback_msg"] = "Pago notificado correctamente. Queda en proceso de verificación por el admin."
             st.rerun()
+
+    st.markdown("---")
+    mostrar_historial_pagos_cliente(user["username"], titulo="Histórico de abonos y pagos")
 
     msg_pago_local = st.session_state.pop("_pago_credito_feedback_msg", None)
     if msg_pago_local:
@@ -6006,7 +6093,7 @@ with st.sidebar:
                 estado_sync.error(f"No se pudo actualizar stock: {e}")
     st.markdown("---")
 
-    opciones = ["Tienda", "Carrito", "Mis pedidos", "Mis créditos", "Mi perfil"]
+    opciones = ["Tienda", "Carrito", "Mis pedidos", "Mis créditos", "Mis pagos", "Mi perfil"]
     if user["rol"] == "admin":
         opciones += ["Centro admin", "Dashboard", "Control POS", "Rentabilidad", "Publicaciones", "Vendedores", "Productos", "Categorías", "Cotizaciones", "Usuarios", "Métodos de pago", "Validar créditos", "Reportes", "Configuración", "Respaldo"]
     elif user["rol"] == "vendedor":
@@ -6043,6 +6130,8 @@ elif menu == "Mis pedidos":
     mis_pedidos()
 elif menu == "Mis créditos":
     mis_creditos()
+elif menu == "Mis pagos":
+    mis_pagos()
 elif menu == "Mi perfil":
     mi_perfil()
 elif menu == "Centro admin":
