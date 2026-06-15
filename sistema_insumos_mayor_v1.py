@@ -41,7 +41,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V71 POS Separado y Feedback Pagos"
+APP_NAME = "Sistema de Insumos al Mayor V72 Feedback Pago Local"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -3890,8 +3890,18 @@ def mis_creditos():
                      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                   (cr["id"], cr["pedido_id"], cr["username"], now(), monto, monto_bs, metodo_nombre, ref, path, "Pendiente de validar", notas,
                    "usd", 0, get_tasa_bcv(), tasa_actual, monto_bs, metodo_id))
-            set_feedback("Pago notificado correctamente. Queda en proceso de verificación por el admin.", "success")
+            st.session_state["_pago_credito_feedback_msg"] = "Pago notificado correctamente. Queda en proceso de verificación por el admin."
             st.rerun()
+
+    msg_pago_local = st.session_state.pop("_pago_credito_feedback_msg", None)
+    if msg_pago_local:
+        st.markdown("---")
+        st.success(msg_pago_local)
+        st.info("Tu pago ya fue enviado para revisión. El admin debe verificarlo antes de actualizar el saldo.")
+        try:
+            st.toast(msg_pago_local, icon="✅")
+        except Exception:
+            pass
 
     if st.button("📄 Descargar estado de cuenta", use_container_width=True):
         pdf = generar_pdf_estado_cuenta(user["username"])
