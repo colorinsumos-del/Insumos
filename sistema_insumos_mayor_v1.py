@@ -41,7 +41,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V66 Creación de Pedido Segura"
+APP_NAME = "Sistema de Insumos al Mayor V67 Pago Contado y Packing List"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -1575,6 +1575,25 @@ def usuarios_visibles_para(user):
         return [r["username"] for r in rows]
     return [user["username"]]
 
+def registrar_pago_contado_pendiente(pedido_id, username, monto_usd, monto_bs, metodo, referencia="", comprobante=None, notas="", metodo_pago_id=0):
+    """
+    Registra una notificación de pago contado como abono sin crédito asociado.
+    Queda pendiente para que admin lo valide desde Centro admin / Validar créditos.
+    """
+    try:
+        path = save_uploaded_file(comprobante, PAGOS_DIR, prefix=f"pago_contado_pedido_{pedido_id}") if comprobante is not None else None
+    except Exception:
+        path = None
+
+    q("""INSERT INTO abonos
+         (credito_id,pedido_id,username,fecha,monto_usd,monto_bs,metodo,referencia,comprobante_path,status,notas,
+          tipo_credito,monto_bcv,tasa_bcv,tasa_proveedor,monto_bs_esperado,metodo_pago_id)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+      (0, int(pedido_id), username, now(), float(monto_usd or 0), float(monto_bs or 0), metodo, referencia, path,
+       "Pendiente de validar", notas, "contado", 0, get_tasa_bcv(), get_tasa_proveedor(), float(monto_bs or 0), int(metodo_pago_id or 0)))
+    return True
+
+
 def crear_pedido_desde_carrito(user, carrito, tipo_pago, metodo_pago, envio_usd, notas, cliente_extra=None, tipo_credito="usd", cliente_target_username=None, pedido_token=None):
     pedido_token = (pedido_token or "").strip()
     if pedido_token:
@@ -1681,7 +1700,15 @@ def aplicar_abono_validado(abono_id, admin_username):
     if ab["status"] not in ["Pendiente de validar", "Rechazado"]:
         return False, f"El abono no está disponible para validar. Estado actual: {ab['status']}."
 
-    cr_rows = q("SELECT * FROM creditos WHERE id=?", (ab["credito_id"],), fetch=True)
+    credito_id = int(ab["credito_id"] or 0)
+    if credito_id <= 0:
+        q("""UPDATE abonos SET status='Validado', validado_por=?, fecha_validacion=? WHERE id=?""",
+          (admin_username, now(), abono_id))
+        if int(ab["pedido_id"] or 0) > 0:
+            q("UPDATE pedidos SET status='Finalizado / Pagado' WHERE id=?", (int(ab["pedido_id"]),))
+        return True, f"Pago contado validado. Pedido #{int(ab['pedido_id'] or 0)} marcado como Finalizado / Pagado."
+
+    cr_rows = q("SELECT * FROM creditos WHERE id=?", (credito_id,), fetch=True)
     if not cr_rows:
         return False, "Crédito no encontrado."
     cr = cr_rows[0]
@@ -2023,22 +2050,17 @@ def recalcular_item_carrito(item, nueva_cantidad=None, user=None):
 
 
 def texto_linea_carrito(item):
+    """Resumen limpio para cliente en carrito. El detalle operativo queda para Packing List."""
     presentacion = item.get("presentacion", "unidad")
-    cantidad = int(item.get("cantidad_presentacion", 1))
-    unidades = int(item.get("unidades_base_total", cantidad))
-    escala = item.get("escala_aplicada", presentacion)
-    precio_total = float(item.get("precio_total", 0) or 0)
+    cantidad = int(item.get("cantidad_presentacion", 1) or 1)
+    unidades = int(item.get("unidades_base_total", cantidad) or cantidad)
     nombre = presentacion_display_item(item)
-
     extra = " · ⭐ precio especial" if item.get("precio_especial_aplicado") else ""
+
     if presentacion == "unidad":
-        return f"{unidades} unidad(es) · Precio aplicado: {escala}{extra}"
+        return f"{unidades} unidad(es){extra}"
+    return f"{cantidad} {nombre}(s) · {unidades} unidad(es){extra}"
 
-    if cantidad == 1:
-        return f"1 {nombre} = {unidades} unidad(es) · Total {nombre}: {money_usd(precio_total)}{extra}"
-
-    precio_pres = precio_total / cantidad if cantidad else 0
-    return f"{cantidad} {nombre}(s) = {unidades} unidad(es) · {money_usd(precio_pres)} c/{nombre}"
 
 
 def resumen_presentacion_catalogo(prod, presentacion, cantidad):
@@ -2425,6 +2447,70 @@ def generar_pdf_pedido(pedido_id):
     if isinstance(out, str):
         return out.encode("latin-1", "replace")
     return bytes(out)
+
+def generar_pdf_packing_list_pedido(pedido_id):
+    rows = q("SELECT * FROM pedidos WHERE id=?", (int(pedido_id),), fetch=True)
+    if not rows:
+        return b""
+    ped = rows[0]
+    try:
+        items = json.loads(ped["items"] or "{}")
+    except Exception:
+        items = {}
+
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=14)
+    pdf.add_page()
+    pdf.set_font("Arial", "B", 16)
+    pdf.cell(190, 8, pdf_clean(get_config("nombre_empresa", "Sistema de Insumos al Mayor")), ln=1, align="C")
+    pdf.set_font("Arial", "", 9)
+    pdf.cell(190, 5, pdf_clean("PACKING LIST / LISTA DE PREPARACION"), ln=1, align="C")
+    pdf.ln(4)
+
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(190, 7, pdf_clean(f"Pedido #{pedido_id}"), ln=1)
+    pdf.set_font("Arial", "", 9)
+    pdf.cell(95, 6, pdf_clean(f"Fecha: {ped['fecha']}"), ln=0)
+    pdf.cell(95, 6, pdf_clean(f"Cliente: {ped['cliente_nombre'] or ped['username']}"), ln=1)
+    pdf.cell(95, 6, pdf_clean(f"Estado: {ped['status']}"), ln=0)
+    pdf.cell(95, 6, pdf_clean(f"Telefono: {ped['cliente_telefono'] or 'N/A'}"), ln=1)
+    if ped["cliente_direccion"]:
+        pdf.multi_cell(190, 5, pdf_clean(f"Direccion: {ped['cliente_direccion']}"))
+    pdf.ln(4)
+
+    headers = [("Preparar", 30), ("Unid.", 20), ("SKU", 38), ("Producto", 82), ("Check", 20)]
+    pdf.set_fill_color(230, 230, 230)
+    pdf.set_font("Arial", "B", 8)
+    for h, w in headers:
+        pdf.cell(w, 7, pdf_clean(h), 1, 0, "C", True)
+    pdf.ln()
+
+    pdf.set_font("Arial", "", 8)
+    for k, d in items.items():
+        preparar = formato_cantidad_pdf_simple(d)
+        unidades = str(int(d.get("unidades_base_total", d.get("cantidad_presentacion", 0)) or 0))
+        sku_txt = sku_limpio_pdf(d.get("sku", k))
+        producto = pdf_clean(d.get("desc", ""))[:58]
+        vals = [preparar[:18], unidades[:8], sku_txt[:22], producto, "[  ]"]
+        for val, (_, w) in zip(vals, headers):
+            align = "C" if val == "[  ]" else "L"
+            pdf.cell(w, 7, pdf_clean(val), 1, 0, align)
+        pdf.ln()
+
+    pdf.ln(5)
+    pdf.set_font("Arial", "", 9)
+    pdf.multi_cell(190, 5, pdf_clean("Uso interno: marcar cada linea al preparar el pedido. Este documento no reemplaza la nota/PDF comercial."))
+    if ped["notas"]:
+        pdf.ln(2)
+        pdf.multi_cell(190, 5, pdf_clean(f"Notas del pedido: {ped['notas']}"))
+
+    pdf_force_latin1(pdf)
+    out = pdf.output(dest="S")
+    if isinstance(out, str):
+        return out.encode("latin-1", "replace")
+    return bytes(out)
+
+
 
 def generar_pdf_estado_cuenta(username):
     user = get_user(username)
@@ -3763,7 +3849,9 @@ def admin_tareas_counts():
 def abono_resumen_label(ab):
     tipo = str(ab["tipo_credito"] if "tipo_credito" in ab.keys() and ab["tipo_credito"] else "usd").lower()
     monto_txt = f"{money_usd(ab['monto_bcv'] or ab['monto_usd'])} BCV" if tipo == "bcv" else money_usd(ab["monto_usd"])
-    return f"#{ab['id']} · Crédito #{ab['credito_id']} · {ab['username']} · {monto_txt} · {ab['status']}"
+    credito_id = int(ab["credito_id"] or 0)
+    origen = f"Crédito #{credito_id}" if credito_id > 0 else f"Pago contado pedido #{int(ab['pedido_id'] or 0)}"
+    return f"#{ab['id']} · {origen} · {ab['username']} · {monto_txt} · {ab['status']}"
 
 def admin_gestionar_abono(abono_id, key_prefix="abono_admin"):
     rows = q("SELECT * FROM abonos WHERE id=?", (int(abono_id),), fetch=True)
@@ -3775,7 +3863,11 @@ def admin_gestionar_abono(abono_id, key_prefix="abono_admin"):
 
     st.markdown(f"### Abono #{ab['id']}")
     cinfo1, cinfo2, cinfo3 = st.columns(3)
-    cinfo1.write(f"**Crédito:** #{ab['credito_id']}")
+    credito_id_info = int(ab["credito_id"] or 0)
+    if credito_id_info > 0:
+        cinfo1.write(f"**Crédito:** #{credito_id_info}")
+    else:
+        cinfo1.write("**Origen:** Pago contado")
     cinfo2.write(f"**Pedido:** #{ab['pedido_id']}")
     cinfo3.write(f"**Estado:** {ab['status']}")
     st.caption(f"Cliente/usuario: {ab['username']} · Fecha: {ab['fecha']}")
@@ -3866,8 +3958,12 @@ def admin_panel_pedido(pedido_id, key_prefix="pedido_admin"):
                      column_config={"Subtotal USD": st.column_config.NumberColumn(format="$%.2f")})
 
     pdf = generar_pdf_pedido(int(pedido_id))
-    st.download_button("📄 Descargar PDF del pedido", data=pdf, file_name=f"pedido_{int(pedido_id):04d}.pdf",
+    packing_pdf = generar_pdf_packing_list_pedido(int(pedido_id))
+    dp1, dp2 = st.columns(2)
+    dp1.download_button("📄 Descargar PDF del pedido", data=pdf, file_name=f"pedido_{int(pedido_id):04d}.pdf",
                        mime="application/pdf", use_container_width=True, key=f"{key_prefix}_pdf_{pedido_id}")
+    dp2.download_button("📦 Descargar Packing List", data=packing_pdf, file_name=f"packing_list_{int(pedido_id):04d}.pdf",
+                       mime="application/pdf", use_container_width=True, key=f"{key_prefix}_packing_{pedido_id}")
 
     estados = ["Pendiente", "Pendiente de pago/entrega", "Crédito pendiente", "Crédito parcial", "Pago por validar",
                "Confirmado", "Preparando", "Listo para entregar", "Entregado", "Finalizado / Pagado",
@@ -5375,11 +5471,56 @@ def carrito_view():
     if user["rol"] == "admin":
         st.caption("Como admin puedes crear crédito para un cliente seleccionado. El pedido y el crédito quedarán a nombre de ese cliente.")
 
-    metodo_pago = st.selectbox(
-        "Método de pago",
-        ["Por confirmar", "Divisas", "Transferencia", "Pago móvil", "Zelle", "Zinli", "Binance", "Otro"],
-        key="metodo_pago_pedido"
-    )
+    pago_contado_mp = None
+    pago_contado_metodo_id = 0
+    pago_contado_notificacion = "Solo crear pedido"
+    pago_contado_ref = ""
+    pago_contado_comp = None
+    pago_contado_notas = ""
+
+    if tipo_operacion == "Contado":
+        st.markdown("#### Método de pago para contado")
+        metodos_contado = metodos_pago_activos()
+        if metodos_contado:
+            opts_metodos_contado = {"Selecciona método de pago": None}
+            for mp_tmp in metodos_contado:
+                opts_metodos_contado[metodo_pago_label(mp_tmp)] = mp_tmp
+            metodo_sel_contado = st.selectbox("Método de pago", list(opts_metodos_contado.keys()), key="metodo_pago_pedido_contado")
+            pago_contado_mp = opts_metodos_contado[metodo_sel_contado]
+            metodo_pago = metodo_pago_label(pago_contado_mp) if pago_contado_mp else "Por confirmar"
+            pago_contado_metodo_id = int(pago_contado_mp["id"]) if pago_contado_mp else 0
+            if pago_contado_mp:
+                render_metodo_pago_card(pago_contado_mp)
+                render_instruccion_comprobante(pago_contado_mp)
+        else:
+            st.warning("No hay métodos de pago activos cargados por el admin.")
+            metodo_pago = st.selectbox(
+                "Método de pago",
+                ["Por confirmar", "Divisas", "Transferencia", "Pago móvil", "Zelle", "Zinli", "Binance", "Otro"],
+                key="metodo_pago_pedido"
+            )
+
+        if metodo_pago != "Por confirmar":
+            pago_contado_notificacion = st.radio(
+                "Notificación del pago",
+                ["Solo crear pedido", "Cargar referencia/comprobante ahora", "Enviar captura por WhatsApp"],
+                horizontal=False,
+                key="pago_contado_notificacion"
+            )
+            if pago_contado_notificacion == "Cargar referencia/comprobante ahora":
+                pago_contado_ref = st.text_input("Referencia del pago", key="pago_contado_ref")
+                pago_contado_comp = st.file_uploader("Comprobante", type=["jpg","jpeg","png","webp","pdf"], key="pago_contado_comp")
+                pago_contado_notas = st.text_area("Notas del pago", key="pago_contado_notas")
+            elif pago_contado_notificacion == "Enviar captura por WhatsApp":
+                st.info("El sistema creará una tarea pendiente para el admin. Envía la captura por WhatsApp al 04126901346 e indica el número de pedido.")
+                pago_contado_ref = "WhatsApp"
+                pago_contado_notas = "Cliente indicó que enviará captura por WhatsApp al 04126901346."
+    else:
+        metodo_pago = st.selectbox(
+            "Método de pago",
+            ["Por confirmar", "Divisas", "Transferencia", "Pago móvil", "Zelle", "Zinli", "Binance", "Otro"],
+            key="metodo_pago_pedido"
+        )
 
     if cliente_usa_ml_envio(cliente_pedido):
         envio_pedido = st.number_input(
@@ -5418,27 +5559,19 @@ def carrito_view():
         st.warning("Selecciona un método de pago para continuar.")
 
     if tipo_operacion == "Contado":
-        if metodo_pago in ["Transferencia", "Pago móvil"]:
-            st.info(
-                f"Pago en Bs seleccionado.\n\n"
-                f"Cliente: {cliente_pedido['nombre'] or cliente_pedido['username']}\n\n"
-                f"Total del pedido: {money_usd(total_preview_usd)}\n\n"
-                f"Tasa proveedor actual: {tasa_prov_preview:,.2f}\n\n"
-                f"Cliente debe transferir: {money_bs(total_preview_bs)}"
-            )
-        elif metodo_pago in ["Divisas", "Zelle", "Zinli", "Binance"]:
-            st.info(
-                f"Pago en divisas seleccionado.\n\n"
-                f"Cliente: {cliente_pedido['nombre'] or cliente_pedido['username']}\n\n"
-                f"Total a cancelar: {money_usd(total_preview_usd)} por {metodo_pago}."
-            )
-        elif metodo_pago == "Otro":
-            st.info(
-                f"Método de pago Otro.\n\n"
-                f"Cliente: {cliente_pedido['nombre'] or cliente_pedido['username']}\n\n"
-                f"Total del pedido: {money_usd(total_preview_usd)}\n\n"
-                f"Referencia en Bs a tasa proveedor: {money_bs(total_preview_bs)}"
-            )
+        st.info(
+            f"Pago contado seleccionado.\n\n"
+            f"Cliente: {cliente_pedido['nombre'] or cliente_pedido['username']}\n\n"
+            f"Método: {metodo_pago}\n\n"
+            f"Total del pedido: {money_usd(total_preview_usd)}\n\n"
+            f"Equivalente Bs a tasa proveedor actual ({tasa_prov_preview:,.2f}): {money_bs(total_preview_bs)}"
+        )
+        if pago_contado_notificacion == "Cargar referencia/comprobante ahora":
+            st.success("Al crear el pedido se cargará una notificación de pago pendiente para validación del admin.")
+        elif pago_contado_notificacion == "Enviar captura por WhatsApp":
+            st.warning("Al crear el pedido se notificará al admin que el cliente enviará captura por WhatsApp.")
+        else:
+            st.caption("Puedes crear el pedido sin notificar pago todavía.")
 
     elif tipo_operacion == "Crédito en divisas":
         if not credito_habilitado_ok:
@@ -5554,9 +5687,27 @@ def carrito_view():
                 if pid:
                     reset_token_pedido_seguro()
                     st.session_state["_ultimo_pedido_creado_id"] = int(pid)
+
+                    if tipo_operacion == "Contado" and pago_contado_notificacion in ["Cargar referencia/comprobante ahora", "Enviar captura por WhatsApp"]:
+                        registrar_pago_contado_pendiente(
+                            pid,
+                            cliente_pedido["username"],
+                            total_preview_usd,
+                            total_preview_bs,
+                            metodo_pago,
+                            referencia=pago_contado_ref,
+                            comprobante=pago_contado_comp if pago_contado_notificacion == "Cargar referencia/comprobante ahora" else None,
+                            notas=pago_contado_notas,
+                            metodo_pago_id=pago_contado_metodo_id
+                        )
+                        st.info("Pago contado notificado. Queda pendiente de validación del admin.")
+
                     st.success(f"{msg} Pedido #{pid}.")
                     pdf = generar_pdf_pedido(pid)
-                    st.download_button("⬇️ Descargar PDF pedido", data=pdf, file_name=f"pedido_{pid:04d}.pdf", mime="application/pdf", use_container_width=True)
+                    packing_pdf = generar_pdf_packing_list_pedido(pid)
+                    d1, d2 = st.columns(2)
+                    d1.download_button("⬇️ Descargar PDF pedido", data=pdf, file_name=f"pedido_{pid:04d}.pdf", mime="application/pdf", use_container_width=True)
+                    d2.download_button("📦 Descargar Packing List", data=packing_pdf, file_name=f"packing_list_{pid:04d}.pdf", mime="application/pdf", use_container_width=True)
                 else:
                     st.error(msg)
             finally:
@@ -5614,7 +5765,10 @@ def carrito_view():
                             st.session_state["_ultimo_pedido_creado_id"] = int(pid)
                             st.success(f"{msg} Pedido #{pid} creado con Crédito BCV.")
                             pdf = generar_pdf_pedido(pid)
-                            st.download_button("⬇️ Descargar PDF pedido", data=pdf, file_name=f"pedido_{pid:04d}.pdf", mime="application/pdf", use_container_width=True)
+                            packing_pdf = generar_pdf_packing_list_pedido(pid)
+                            d1, d2 = st.columns(2)
+                            d1.download_button("⬇️ Descargar PDF pedido", data=pdf, file_name=f"pedido_{pid:04d}.pdf", mime="application/pdf", use_container_width=True)
+                            d2.download_button("📦 Descargar Packing List", data=packing_pdf, file_name=f"packing_list_{pid:04d}.pdf", mime="application/pdf", use_container_width=True)
                         else:
                             st.error(msg)
                     finally:
