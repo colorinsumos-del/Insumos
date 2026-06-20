@@ -41,7 +41,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V73 Historial de Pagos Cliente"
+APP_NAME = "Sistema de Insumos al Mayor V74 Home Cliente, Alertas y Duplicar Producto"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -2741,7 +2741,7 @@ def admin_categorias():
 
 def admin_productos():
     st.title("📦 Productos")
-    tab_list, tab_form = st.tabs(["Listado", "Crear / Editar"])
+    tab_list, tab_form, tab_dup = st.tabs(["Listado", "Crear / Editar", "Duplicar producto"])
 
     with tab_list:
         bus = st.text_input("Buscar por SKU o descripción")
@@ -3193,6 +3193,65 @@ def admin_usuarios():
                 st.error(msg)
 
 
+    with tab_dup:
+        st.subheader("Duplicar producto")
+        st.caption("Crea un producto nuevo copiando datos de otro. El producto original no se modifica.")
+
+        bus_dup = st.text_input("Buscar producto a duplicar", placeholder="Nombre o SKU...", key="bus_dup_producto")
+        rows_dup = []
+        if bus_dup:
+            rows_dup = q("""SELECT sku,descripcion FROM productos
+                            WHERE sku LIKE ? OR descripcion LIKE ?
+                            ORDER BY descripcion LIMIT 50""",
+                         (f"%{bus_dup}%", f"%{bus_dup}%"), fetch=True)
+        else:
+            rows_dup = q("SELECT sku,descripcion FROM productos ORDER BY descripcion LIMIT 50", fetch=True)
+
+        if not rows_dup:
+            st.info("No hay productos para duplicar con esa búsqueda.")
+        else:
+            opts_dup = {f"{r['descripcion']} — {r['sku']}": r["sku"] for r in rows_dup}
+            sel_dup = st.selectbox("Producto base", list(opts_dup.keys()), key="sel_dup_producto")
+            sku_base = opts_dup[sel_dup]
+            prod_base_rows = q("SELECT * FROM productos WHERE sku=?", (sku_base,), fetch=True)
+            prod_base = prod_base_rows[0] if prod_base_rows else None
+
+            if prod_base:
+                nuevo_sku = st.text_input("Nuevo SKU", key="dup_nuevo_sku")
+                nuevo_nombre = st.text_input("Nueva descripción", value=f"{prod_base['descripcion']} COPIA", key="dup_nuevo_nombre")
+                copiar_imagen = st.checkbox("Copiar URL de imagen WooCommerce", value=True, key="dup_copiar_img")
+                activo_nuevo = st.checkbox("Crear producto activo", value=False, key="dup_activo")
+                st.info("Recomendación: créalo inactivo, revisa precios/peso/categoría y luego actívalo.")
+
+                if st.button("📄 Duplicar producto", type="primary", use_container_width=True, key="btn_dup_producto"):
+                    if not nuevo_sku.strip() or not nuevo_nombre.strip():
+                        st.error("Nuevo SKU y nueva descripción son obligatorios.")
+                    else:
+                        existe = q("SELECT sku FROM productos WHERE sku=?", (nuevo_sku.strip(),), fetch=True)
+                        if existe:
+                            st.error("Ya existe un producto con ese SKU.")
+                        else:
+                            data = dict(prod_base)
+                            data["sku"] = nuevo_sku.strip()
+                            data["descripcion"] = nuevo_nombre.strip()
+                            data["activo"] = 1 if activo_nuevo else 0
+                            data["creado_en"] = now()
+                            data["actualizado_en"] = now()
+                            data["ultima_sync"] = ""
+                            if not copiar_imagen:
+                                data["wc_imagen_url"] = ""
+                            # Evitar copiar campos calculados/externos innecesarios si existen.
+                            cols = [c[1] for c in q("PRAGMA table_info(productos)", fetch=True)]
+                            insert_cols = [c for c in cols if c in data]
+                            placeholders = ",".join(["?"] * len(insert_cols))
+                            col_sql = ",".join(insert_cols)
+                            vals = [data[c] for c in insert_cols]
+                            q(f"INSERT INTO productos ({col_sql}) VALUES ({placeholders})", vals)
+                            st.session_state["sku_producto_editar"] = nuevo_sku.strip()
+                            st.success("Producto duplicado. Ya quedó cargado para editar en la pestaña Crear / Editar.")
+                            st.rerun()
+
+
 def admin_cotizaciones():
     st.title("📄 Cotizaciones")
     st.caption("Busca por número, cliente, fecha, estado o monto.")
@@ -3420,6 +3479,170 @@ def mostrar_historial_pagos_cliente(username, titulo="Mis pagos notificados"):
     with st.expander("Ver histórico completo de pagos", expanded=False):
         st.dataframe(df, use_container_width=True, hide_index=True)
 
+def estado_visual(texto, tipo="pedido"):
+    t = str(texto or "").strip()
+    low = t.lower()
+    if any(x in low for x in ["finalizado", "pagado", "validado"]):
+        return f"🟢 {t}"
+    if any(x in low for x in ["verificar", "validar", "revisión", "revision", "pago por validar", "pendiente de validar"]):
+        return f"🔵 {t}"
+    if any(x in low for x in ["crédito en curso", "credito en curso", "en curso", "parcial"]):
+        return f"🟡 {t}"
+    if any(x in low for x in ["pendiente", "preparando", "confirmado", "listo"]):
+        return f"🟠 {t}"
+    if any(x in low for x in ["cancelado", "anulado", "rechazado", "vencido"]):
+        return f"🔴 {t}"
+    return f"⚪ {t}"
+
+def pos_visual(valor):
+    try:
+        return "🟢 POS procesado" if int(valor or 0) == 1 else "🟠 POS pendiente"
+    except Exception:
+        return "🟠 POS pendiente"
+
+def alertas_inteligentes_admin():
+    alertas = []
+
+    # Pagos por verificar
+    try:
+        n = q("SELECT COUNT(*) AS n FROM abonos WHERE status='Pendiente de validar'", fetch=True)[0]["n"]
+        if int(n or 0) > 0:
+            alertas.append({"Tipo": "Pagos", "Alerta": f"{int(n)} pago(s) por verificar", "Prioridad": "Alta", "Acción sugerida": "Ir a Centro admin > Pagos por verificar"})
+    except Exception:
+        pass
+
+    # Pedidos pendientes de pago / atención
+    try:
+        n = q("""SELECT COUNT(*) AS n FROM pedidos
+                 WHERE COALESCE(status,'') IN ('Pendiente','Pendiente de pago','Pago por validar','Confirmado','Preparando','Listo para entregar','Crédito en curso')""", fetch=True)[0]["n"]
+        if int(n or 0) > 0:
+            alertas.append({"Tipo": "Pedidos", "Alerta": f"{int(n)} pedido(s) requieren atención", "Prioridad": "Media", "Acción sugerida": "Revisar pedidos por atender"})
+    except Exception:
+        pass
+
+    # POS pendiente
+    try:
+        n = q("""SELECT COUNT(*) AS n FROM pedidos
+                 WHERE COALESCE(pos_procesado,0)=0
+                 AND COALESCE(status,'') NOT IN ('Cancelado','Anulado')""", fetch=True)[0]["n"]
+        if int(n or 0) > 0:
+            alertas.append({"Tipo": "POS", "Alerta": f"{int(n)} pedido(s) pendientes por POS", "Prioridad": "Media", "Acción sugerida": "Ir a Control POS"})
+    except Exception:
+        pass
+
+    # Créditos próximos/vencidos
+    try:
+        rows = q("""SELECT id,cliente_nombre,fecha_vencimiento,saldo_usd,saldo_bcv,tipo_credito,status
+                    FROM creditos
+                    WHERE status NOT IN ('Pagado','Anulado')
+                    AND (COALESCE(saldo_usd,0)>0 OR COALESCE(saldo_bcv,0)>0)""", fetch=True)
+        hoy = datetime.now().date()
+        for cr in rows:
+            fv = str(cr["fecha_vencimiento"] or "").strip()
+            try:
+                dt = datetime.strptime(fv, "%d/%m/%Y").date()
+                dias = (dt - hoy).days
+                if dias < 0:
+                    alertas.append({"Tipo": "Crédito", "Alerta": f"Crédito #{cr['id']} vencido ({cr['cliente_nombre']})", "Prioridad": "Alta", "Acción sugerida": "Contactar cliente / revisar pago"})
+                elif dias <= 3:
+                    alertas.append({"Tipo": "Crédito", "Alerta": f"Crédito #{cr['id']} vence en {dias} día(s) ({cr['cliente_nombre']})", "Prioridad": "Media", "Acción sugerida": "Recordatorio preventivo"})
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Productos sin costo / margen bajo
+    try:
+        problemas = productos_alertas_margen()
+        for p in problemas[:20]:
+            alertas.append({"Tipo": "Producto", "Alerta": f"{p.get('SKU','')} · {p.get('Descripción','')} · {p.get('Alertas','')}", "Prioridad": "Media", "Acción sugerida": "Revisar costo/margen del producto"})
+    except Exception:
+        pass
+
+    # Stock bajo
+    try:
+        umbral = int(parse_float(get_config("stock_bajo_umbral", "5"), 5))
+        rows = q("""SELECT sku,descripcion,wc_stock FROM productos
+                    WHERE activo=1 AND COALESCE(wc_stock,0)>0 AND COALESCE(wc_stock,0)<=?
+                    ORDER BY wc_stock ASC LIMIT 30""", (umbral,), fetch=True)
+        for p in rows:
+            alertas.append({"Tipo": "Stock", "Alerta": f"{p['sku']} · {p['descripcion']} · stock {p['wc_stock']}", "Prioridad": "Media", "Acción sugerida": "Reponer o revisar WooCommerce"})
+    except Exception:
+        pass
+
+    return alertas
+
+def mi_cuenta_home():
+    st.title("👤 Mi cuenta")
+    user = get_user(st.session_state.user["username"])
+    username = user["username"]
+
+    pedidos = pd.read_sql_query("SELECT * FROM pedidos WHERE username=? ORDER BY id DESC LIMIT 10", get_conn(), params=(username,))
+    creditos = pd.read_sql_query("""SELECT * FROM creditos
+                                    WHERE username=?
+                                    AND status NOT IN ('Pagado','Anulado')
+                                    AND (COALESCE(saldo_usd,0)>0 OR COALESCE(saldo_bcv,0)>0)
+                                    ORDER BY id DESC""", get_conn(), params=(username,))
+    pagos = pd.read_sql_query("SELECT * FROM abonos WHERE username=? ORDER BY id DESC LIMIT 20", get_conn(), params=(username,))
+
+    saldo_credito = 0.0
+    saldo_bcv = 0.0
+    if not creditos.empty:
+        saldo_credito = float(creditos["saldo_usd"].fillna(0).sum())
+        if "saldo_bcv" in creditos.columns:
+            saldo_bcv = float(creditos["saldo_bcv"].fillna(0).sum())
+
+    pagos_verif = int((pagos["status"].astype(str) == "Pendiente de validar").sum()) if not pagos.empty else 0
+    pedidos_activos = len(pedidos[~pedidos["status"].astype(str).str.lower().isin(["finalizado / pagado","cancelado","anulado"])]) if not pedidos.empty else 0
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Pedidos activos", pedidos_activos)
+    c2.metric("Pagos en verificación", pagos_verif)
+    c3.metric("Créditos en curso", len(creditos))
+    c4.metric("Saldo crédito", money_usd(saldo_credito))
+
+    if pagos_verif:
+        st.info("Tienes pagos en proceso de verificación. El admin debe validarlos antes de actualizar saldos.")
+    if not creditos.empty:
+        st.warning("Tienes crédito en curso. Puedes notificar abonos desde Mis créditos.")
+
+    st.markdown("### Accesos rápidos")
+    b1, b2, b3, b4 = st.columns(4)
+    if b1.button("🛍️ Ir a tienda", use_container_width=True):
+        st.session_state.menu = "Tienda"
+        st.rerun()
+    if b2.button("🧾 Mis pedidos", use_container_width=True):
+        st.session_state.menu = "Mis pedidos"
+        st.rerun()
+    if b3.button("💳 Mis créditos", use_container_width=True):
+        st.session_state.menu = "Mis créditos"
+        st.rerun()
+    if b4.button("💵 Mis pagos", use_container_width=True):
+        st.session_state.menu = "Mis pagos"
+        st.rerun()
+
+    st.markdown("---")
+    st.subheader("Pedidos recientes")
+    if pedidos.empty:
+        st.info("Todavía no tienes pedidos.")
+    else:
+        vista = pedidos[["id","fecha","cliente_nombre","tipo_pago","total_usd","status"]].copy()
+        vista["estado"] = vista["status"].apply(estado_visual)
+        vista = vista.drop(columns=["status"])
+        st.dataframe(vista, use_container_width=True, hide_index=True,
+                     column_config={"total_usd": st.column_config.NumberColumn(format="$%.2f")})
+
+    st.subheader("Pagos recientes")
+    if pagos.empty:
+        st.info("Todavía no tienes pagos notificados.")
+    else:
+        pview = pagos[["id","fecha","pedido_id","monto_usd","monto_bs","metodo","referencia","status"]].copy()
+        pview["estado"] = pview["status"].apply(estado_visual)
+        pview = pview.drop(columns=["status"])
+        st.dataframe(pview, use_container_width=True, hide_index=True,
+                     column_config={"monto_usd": st.column_config.NumberColumn(format="$%.2f")})
+
+
 def mis_pagos():
     st.title("💵 Mis pagos")
     user = get_user(st.session_state.user["username"])
@@ -3470,9 +3693,13 @@ def mis_pedidos():
     k3.metric("Créditos", int((df_view["tipo_pago"].astype(str).str.lower()=="credito").sum()) if not df_view.empty else 0)
     k4.metric("Pendiente POS", int((df_view["pos_procesado"].fillna(0).astype(int)==0).sum()) if "pos_procesado" in df_view.columns and not df_view.empty else 0)
 
-    resumen_cols = ["id","fecha","cliente_nombre","tipo_pago","total_usd","status"]
+    df_view = df_view.copy()
+    df_view["estado_visual"] = df_view["status"].apply(estado_visual)
     if "pos_procesado" in df_view.columns:
-        resumen_cols.append("pos_procesado")
+        df_view["pos_visual"] = df_view["pos_procesado"].apply(pos_visual)
+    resumen_cols = ["id","fecha","cliente_nombre","tipo_pago","total_usd","estado_visual"]
+    if "pos_visual" in df_view.columns:
+        resumen_cols.append("pos_visual")
     st.dataframe(df_view[resumen_cols], use_container_width=True, hide_index=True,
                  column_config={"total_usd": st.column_config.NumberColumn(format="$%.2f")})
 
@@ -3491,8 +3718,8 @@ def mis_pedidos():
     ctop1, ctop2, ctop3, ctop4 = st.columns(4)
     ctop1.metric("Total", money_usd(p["total_usd"]))
     ctop2.metric("Tipo", str(p["tipo_pago"]).upper())
-    ctop3.metric("Estado", p["status"])
-    ctop4.metric("POS", "Procesado" if int(p["pos_procesado"] or 0) else "Pendiente")
+    ctop3.metric("Estado", estado_visual(p["status"]))
+    ctop4.metric("POS", pos_visual(p["pos_procesado"]))
 
     st.write(f"Cliente: **{p['cliente_nombre']}** · Fecha: **{p['fecha']}** · Método: **{p['metodo_pago'] or 'N/A'}**")
     if p["notas"]:
@@ -4211,7 +4438,15 @@ def admin_centro_tareas():
     c3.metric("POS pendiente", counts["pos"])
     c4.metric("Créditos en curso", counts["creditos"])
 
-    tab1, tab2, tab_pos, tab3 = st.tabs(["Pagos por verificar", "Pedidos por atender", "POS pendiente", "Créditos en curso"])
+    tab_alertas, tab1, tab2, tab_pos, tab3 = st.tabs(["Alertas inteligentes", "Pagos por verificar", "Pedidos por atender", "POS pendiente", "Créditos en curso"])
+
+    with tab_alertas:
+        alertas = alertas_inteligentes_admin()
+        if not alertas:
+            st.success("Sin alertas importantes por ahora.")
+        else:
+            st.warning(f"{len(alertas)} alerta(s) detectada(s).")
+            st.dataframe(pd.DataFrame(alertas), use_container_width=True, hide_index=True)
 
     with tab1:
         abonos = q("SELECT * FROM abonos WHERE status='Pendiente de validar' ORDER BY id DESC", fetch=True)
@@ -4234,6 +4469,9 @@ def admin_centro_tareas():
         if pedidos.empty:
             st.success("No hay pedidos por atender.")
         else:
+            pedidos = pedidos.copy()
+            pedidos["estado_visual"] = pedidos["status"].apply(estado_visual)
+            pedidos["pos_visual"] = pedidos["pos_procesado"].apply(pos_visual)
             st.dataframe(pedidos, use_container_width=True, hide_index=True,
                          column_config={"total_usd": st.column_config.NumberColumn(format="$%.2f")})
             opts_ped = {
@@ -4253,6 +4491,9 @@ def admin_centro_tareas():
             st.success("No hay pedidos pendientes por POS.")
         else:
             st.caption("Marcar POS no cambia el estado del pedido ni del crédito. Solo sirve como indicativo interno de Color Insumos.")
+            pedidos_pos = pedidos_pos.copy()
+            pedidos_pos["estado_visual"] = pedidos_pos["status"].apply(estado_visual)
+            pedidos_pos["pos_visual"] = pedidos_pos["pos_procesado"].apply(pos_visual)
             st.dataframe(pedidos_pos, use_container_width=True, hide_index=True,
                          column_config={"total_usd": st.column_config.NumberColumn(format="$%.2f")})
             opts_pos = {
@@ -6093,7 +6334,7 @@ with st.sidebar:
                 estado_sync.error(f"No se pudo actualizar stock: {e}")
     st.markdown("---")
 
-    opciones = ["Tienda", "Carrito", "Mis pedidos", "Mis créditos", "Mis pagos", "Mi perfil"]
+    opciones = ["Mi cuenta", "Tienda", "Carrito", "Mis pedidos", "Mis créditos", "Mis pagos", "Mi perfil"]
     if user["rol"] == "admin":
         opciones += ["Centro admin", "Dashboard", "Control POS", "Rentabilidad", "Publicaciones", "Vendedores", "Productos", "Categorías", "Cotizaciones", "Usuarios", "Métodos de pago", "Validar créditos", "Reportes", "Configuración", "Respaldo"]
     elif user["rol"] == "vendedor":
@@ -6101,9 +6342,9 @@ with st.sidebar:
     elif user["rol"] == "vendedor_mercadolibre":
         opciones += ["Publicaciones"]
 
-    current = st.session_state.get("menu", "Tienda")
+    current = st.session_state.get("menu", "Mi cuenta")
     if current not in opciones:
-        current = "Tienda"
+        current = "Mi cuenta"
 
     menu = st.radio("Menú", opciones, index=opciones.index(current))
     st.session_state.menu = menu
@@ -6122,7 +6363,9 @@ with st.sidebar:
 
 backup_auto_si_corresponde()
 
-if menu == "Tienda":
+if menu == "Mi cuenta":
+    mi_cuenta_home()
+elif menu == "Tienda":
     tienda()
 elif menu == "Carrito":
     carrito_view()
