@@ -41,7 +41,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V74 Home Cliente, Alertas y Duplicar Producto"
+APP_NAME = "Sistema de Insumos al Mayor V75 Nómina Admin Simple"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -691,6 +691,60 @@ def init_db():
     )
     """)
     q("""
+    CREATE TABLE IF NOT EXISTS nomina_trabajadores (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nombre TEXT,
+        cedula TEXT,
+        cargo TEXT,
+        fecha_ingreso TEXT,
+        salario_mensual_usd REAL DEFAULT 250,
+        activo INTEGER DEFAULT 1,
+        telefono TEXT,
+        metodo_pago TEXT,
+        notas TEXT,
+        creado_en TEXT,
+        actualizado_en TEXT
+    )
+    """)
+
+    q("""
+    CREATE TABLE IF NOT EXISTS nomina_adelantos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        trabajador_id INTEGER,
+        fecha TEXT,
+        monto_usd REAL DEFAULT 0,
+        tasa_proveedor REAL DEFAULT 0,
+        monto_bs REAL DEFAULT 0,
+        saldo_usd REAL DEFAULT 0,
+        estado TEXT DEFAULT 'Pendiente',
+        motivo TEXT,
+        pago_id INTEGER DEFAULT 0,
+        creado_en TEXT
+    )
+    """)
+
+    q("""
+    CREATE TABLE IF NOT EXISTS nomina_pagos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        trabajador_id INTEGER,
+        fecha TEXT,
+        periodo TEXT,
+        base_usd REAL DEFAULT 0,
+        bono_usd REAL DEFAULT 0,
+        utilidad_usd REAL DEFAULT 0,
+        descuento_adelanto_usd REAL DEFAULT 0,
+        total_usd REAL DEFAULT 0,
+        tasa_proveedor REAL DEFAULT 0,
+        total_bs REAL DEFAULT 0,
+        metodo_pago TEXT,
+        referencia TEXT,
+        notas TEXT,
+        creado_por TEXT,
+        creado_en TEXT
+    )
+    """)
+
+    q("""
     CREATE TABLE IF NOT EXISTS configuracion (
         clave TEXT PRIMARY KEY,
         valor TEXT
@@ -826,6 +880,18 @@ def init_db():
     add_col("abonos", "tasa_proveedor", "REAL DEFAULT 0")
     add_col("abonos", "metodo_pago_id", "INTEGER DEFAULT 0")
 
+    # V75: migraciones suaves nómina.
+    try:
+        add_col("nomina_trabajadores", "telefono", "TEXT")
+        add_col("nomina_trabajadores", "metodo_pago", "TEXT")
+        add_col("nomina_trabajadores", "notas", "TEXT")
+        add_col("nomina_trabajadores", "actualizado_en", "TEXT")
+        add_col("nomina_adelantos", "pago_id", "INTEGER DEFAULT 0")
+        add_col("nomina_pagos", "utilidad_usd", "REAL DEFAULT 0")
+        add_col("nomina_pagos", "bono_usd", "REAL DEFAULT 0")
+    except Exception:
+        pass
+
     # V71: separar POS del estado comercial y normalizar créditos activos.
     try:
         q("UPDATE creditos SET status='En curso' WHERE status='Pendiente'")
@@ -835,6 +901,7 @@ def init_db():
         pass
 
     set_default("stock_auto_sync_minutos", "0")
+    set_default("nomina_dias_utilidades", "30")
 
     # Categorías iniciales:
     # Se crean una sola vez. Antes se recreaban en cada arranque si el admin las borraba.
@@ -1354,7 +1421,7 @@ def crear_respaldo(destino=None):
     destino.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    tablas = ["usuarios", "categorias", "productos", "cotizaciones", "pedidos", "creditos", "abonos", "metodos_pago", "carritos", "productos_vendedores", "configuracion"]
+    tablas = ["usuarios", "categorias", "productos", "cotizaciones", "pedidos", "creditos", "abonos", "metodos_pago", "carritos", "productos_vendedores", "nomina_trabajadores", "nomina_adelantos", "nomina_pagos", "configuracion"]
     data = {}
     for t in tablas:
         try:
@@ -1388,10 +1455,10 @@ def importar_respaldo_json(uploaded_file, modo="fusionar"):
 
     data = json.load(uploaded_file)
 
-    tablas = ["categorias", "usuarios", "productos", "cotizaciones", "pedidos", "creditos", "abonos", "metodos_pago", "carritos", "productos_vendedores", "configuracion"]
+    tablas = ["categorias", "usuarios", "productos", "cotizaciones", "pedidos", "creditos", "abonos", "metodos_pago", "carritos", "productos_vendedores", "nomina_trabajadores", "nomina_adelantos", "nomina_pagos", "configuracion"]
 
     if modo == "reemplazar":
-        for t in ["abonos", "creditos", "pedidos", "cotizaciones", "productos", "categorias", "metodos_pago", "carritos", "productos_vendedores"]:
+        for t in ["abonos", "creditos", "pedidos", "cotizaciones", "productos", "categorias", "metodos_pago", "carritos", "productos_vendedores", "nomina_pagos", "nomina_adelantos", "nomina_trabajadores"]:
             try:
                 q(f"DELETE FROM {t}")
             except Exception:
@@ -4587,6 +4654,396 @@ def validar_creditos():
             admin_gestionar_abono(opts[sel], key_prefix="validar_creditos")
 
 
+def nomina_trabajadores_activos(incluir_inactivos=False):
+    if incluir_inactivos:
+        return q("SELECT * FROM nomina_trabajadores ORDER BY activo DESC, nombre", fetch=True)
+    return q("SELECT * FROM nomina_trabajadores WHERE activo=1 ORDER BY nombre", fetch=True)
+
+def nomina_trabajador_label(t):
+    estado = "" if int(t["activo"] or 0) == 1 else " (inactivo)"
+    return f"{t['nombre']} — {t['cargo'] or 'Sin cargo'} — {money_usd(t['salario_mensual_usd'])}{estado}"
+
+def nomina_anio_de_fecha(fecha_txt):
+    try:
+        return datetime.strptime(str(fecha_txt)[:10], "%d/%m/%Y").year
+    except Exception:
+        return datetime.now().year
+
+def nomina_utilidades_pagadas(trabajador_id, anio=None):
+    anio = int(anio or datetime.now().year)
+    rows = q("SELECT fecha, utilidad_usd FROM nomina_pagos WHERE trabajador_id=?", (int(trabajador_id),), fetch=True)
+    total = 0.0
+    for r in rows:
+        if nomina_anio_de_fecha(r["fecha"]) == anio:
+            total += float(r["utilidad_usd"] or 0)
+    return total
+
+def nomina_adelantos_pendientes(trabajador_id):
+    row = q("SELECT COALESCE(SUM(saldo_usd),0) AS s FROM nomina_adelantos WHERE trabajador_id=? AND estado='Pendiente'", (int(trabajador_id),), fetch=True)
+    return float(row[0]["s"] or 0) if row else 0.0
+
+def nomina_aplicar_descuento_adelantos(trabajador_id, monto_usd, pago_id):
+    restante = float(monto_usd or 0)
+    if restante <= 0:
+        return 0.0
+    rows = q("""SELECT * FROM nomina_adelantos
+                WHERE trabajador_id=? AND estado='Pendiente' AND COALESCE(saldo_usd,0)>0
+                ORDER BY id ASC""", (int(trabajador_id),), fetch=True)
+    aplicado = 0.0
+    for ad in rows:
+        if restante <= 0:
+            break
+        saldo = float(ad["saldo_usd"] or 0)
+        desc = min(saldo, restante)
+        nuevo_saldo = round(saldo - desc, 4)
+        nuevo_estado = "Descontado" if nuevo_saldo <= 0.0001 else "Pendiente"
+        q("UPDATE nomina_adelantos SET saldo_usd=?, estado=?, pago_id=? WHERE id=?",
+          (max(0.0, nuevo_saldo), nuevo_estado, int(pago_id), int(ad["id"])))
+        aplicado += desc
+        restante -= desc
+    return aplicado
+
+def generar_pdf_nomina_pago(pago_id):
+    rows = q("""SELECT p.*, t.nombre, t.cedula, t.cargo, t.salario_mensual_usd
+                FROM nomina_pagos p
+                LEFT JOIN nomina_trabajadores t ON t.id=p.trabajador_id
+                WHERE p.id=?""", (int(pago_id),), fetch=True)
+    if not rows:
+        return b""
+    p = rows[0]
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=14)
+    pdf.add_page()
+    pdf.set_font("Arial", "B", 16)
+    pdf.cell(190, 8, pdf_clean(get_config("nombre_empresa", "Sistema de Insumos al Mayor")), ln=1, align="C")
+    pdf.set_font("Arial", "", 9)
+    pdf.cell(190, 5, pdf_clean("RECIBO DE PAGO DE NOMINA / CONTROL INTERNO"), ln=1, align="C")
+    pdf.ln(4)
+
+    pdf.set_font("Arial", "B", 13)
+    pdf.cell(190, 8, pdf_clean(f"RECIBO NOMINA #{int(p['id'])}"), ln=1)
+    pdf.set_font("Arial", "", 9)
+    pdf.cell(95, 6, pdf_clean(f"Fecha: {p['fecha']}"), ln=0)
+    pdf.cell(95, 6, pdf_clean(f"Periodo: {p['periodo']}"), ln=1)
+    pdf.cell(95, 6, pdf_clean(f"Trabajador: {p['nombre'] or ''}"), ln=0)
+    pdf.cell(95, 6, pdf_clean(f"CI: {p['cedula'] or 'N/A'}"), ln=1)
+    pdf.cell(95, 6, pdf_clean(f"Cargo: {p['cargo'] or 'N/A'}"), ln=0)
+    pdf.cell(95, 6, pdf_clean(f"Salario mensual ref.: {money_usd(p['salario_mensual_usd'] or 0)}"), ln=1)
+    pdf.ln(4)
+
+    pdf.set_fill_color(230, 230, 230)
+    pdf.set_font("Arial", "B", 9)
+    pdf.cell(130, 7, pdf_clean("Concepto"), 1, 0, "C", True)
+    pdf.cell(60, 7, pdf_clean("Monto USD"), 1, 1, "C", True)
+    pdf.set_font("Arial", "", 9)
+    conceptos = [
+        ("Sueldo base del periodo", p["base_usd"]),
+        ("Bono", p["bono_usd"]),
+        ("Adelanto de utilidades", p["utilidad_usd"]),
+        ("Descuento de adelantos", -float(p["descuento_adelanto_usd"] or 0)),
+    ]
+    for label, val in conceptos:
+        pdf.cell(130, 7, pdf_clean(label), 1, 0, "L")
+        pdf.cell(60, 7, money_usd(val), 1, 1, "R")
+
+    pdf.set_font("Arial", "B", 10)
+    pdf.cell(130, 8, pdf_clean("TOTAL NETO PAGADO"), 1, 0, "R")
+    pdf.cell(60, 8, money_usd(p["total_usd"]), 1, 1, "R")
+
+    pdf.set_font("Arial", "", 9)
+    pdf.ln(3)
+    pdf.cell(190, 6, pdf_clean(f"Tasa proveedor usada: {float(p['tasa_proveedor'] or 0):,.2f}"), ln=1)
+    pdf.cell(190, 6, pdf_clean(f"Total pagado en Bs: {money_bs(p['total_bs'])}"), ln=1)
+    pdf.cell(190, 6, pdf_clean(f"Metodo: {p['metodo_pago'] or 'N/A'} | Referencia: {p['referencia'] or 'N/A'}"), ln=1)
+    if p["notas"]:
+        pdf.multi_cell(190, 5, pdf_clean(f"Notas: {p['notas']}"))
+
+    pdf.ln(12)
+    pdf.cell(90, 7, "____________________________", ln=0, align="C")
+    pdf.cell(10, 7, "", ln=0)
+    pdf.cell(90, 7, "____________________________", ln=1, align="C")
+    pdf.cell(90, 6, pdf_clean("Firma trabajador"), ln=0, align="C")
+    pdf.cell(10, 6, "", ln=0)
+    pdf.cell(90, 6, pdf_clean("Firma admin"), ln=1, align="C")
+
+    pdf.set_font("Arial", "I", 8)
+    pdf.ln(4)
+    pdf.multi_cell(190, 4, pdf_clean("Nota: recibo de control interno. Validar criterios laborales/fiscales definitivos con contador o asesor laboral."))
+    pdf_force_latin1(pdf)
+    out = pdf.output(dest="S")
+    if isinstance(out, str):
+        return out.encode("latin-1", "replace")
+    return bytes(out)
+
+def nomina_admin():
+    st.title("👥 Nómina")
+    st.caption("Control interno de pagos, adelantos, bonos y utilidades adelantadas. No sustituye asesoría contable/laboral.")
+
+    tab_resumen, tab_trab, tab_pago, tab_adel, tab_util, tab_hist = st.tabs([
+        "Resumen", "Trabajadores", "Generar pago", "Adelantos", "Utilidades", "Histórico"
+    ])
+
+    with tab_resumen:
+        trabajadores = nomina_trabajadores_activos()
+        pagos_mes = pd.read_sql_query("SELECT * FROM nomina_pagos ORDER BY id DESC", get_conn())
+        adelantos = pd.read_sql_query("SELECT * FROM nomina_adelantos ORDER BY id DESC", get_conn())
+
+        mes_actual = datetime.now().month
+        anio_actual = datetime.now().year
+        total_mes = 0.0
+        bonos_mes = 0.0
+        util_mes = 0.0
+        if not pagos_mes.empty:
+            temp = pagos_mes.copy()
+            temp["_anio"] = temp["fecha"].apply(nomina_anio_de_fecha)
+            temp["_mes"] = temp["fecha"].astype(str).str.slice(3,5).apply(lambda x: int(x) if str(x).isdigit() else 0)
+            temp_mes = temp[(temp["_anio"] == anio_actual) & (temp["_mes"] == mes_actual)]
+            total_mes = float(temp_mes["total_usd"].fillna(0).sum()) if not temp_mes.empty else 0.0
+            bonos_mes = float(temp_mes["bono_usd"].fillna(0).sum()) if not temp_mes.empty else 0.0
+            util_mes = float(temp_mes["utilidad_usd"].fillna(0).sum()) if not temp_mes.empty else 0.0
+
+        adel_pend = float(adelantos[adelantos["estado"]=="Pendiente"]["saldo_usd"].sum()) if not adelantos.empty else 0.0
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Trabajadores activos", len(trabajadores))
+        c2.metric("Pagado este mes", money_usd(total_mes))
+        c3.metric("Bonos este mes", money_usd(bonos_mes))
+        c4.metric("Adelantos pendientes", money_usd(adel_pend))
+
+        st.markdown("#### Resumen de utilidades del año")
+        data_util = []
+        dias_util = parse_float(get_config("nomina_dias_utilidades", "30"), 30)
+        for t in trabajadores:
+            estimado = float(t["salario_mensual_usd"] or 0) / 30 * dias_util
+            pagado = nomina_utilidades_pagadas(t["id"], anio_actual)
+            data_util.append({
+                "Trabajador": t["nombre"],
+                "Salario mensual": money_usd(t["salario_mensual_usd"]),
+                "Utilidades estimadas": money_usd(estimado),
+                "Adelantado": money_usd(pagado),
+                "Pendiente": money_usd(max(0, estimado - pagado)),
+            })
+        if data_util:
+            st.dataframe(pd.DataFrame(data_util), use_container_width=True, hide_index=True)
+        else:
+            st.info("Crea trabajadores para ver el resumen.")
+
+    with tab_trab:
+        st.subheader("Trabajadores")
+        rows = nomina_trabajadores_activos(incluir_inactivos=True)
+        if rows:
+            df = pd.DataFrame([dict(r) for r in rows])
+            st.dataframe(df[["id","nombre","cedula","cargo","fecha_ingreso","salario_mensual_usd","activo","telefono","metodo_pago"]], use_container_width=True, hide_index=True,
+                         column_config={"salario_mensual_usd": st.column_config.NumberColumn(format="$%.2f")})
+        else:
+            st.info("Todavía no hay trabajadores.")
+
+        st.markdown("#### Crear / editar trabajador")
+        opts = {"Crear nuevo": 0}
+        for t in rows:
+            opts[nomina_trabajador_label(t)] = int(t["id"])
+        sel = st.selectbox("Seleccionar", list(opts.keys()), key="nomina_trab_sel")
+        tid = opts[sel]
+        trow = q("SELECT * FROM nomina_trabajadores WHERE id=?", (tid,), fetch=True)[0] if tid else None
+
+        with st.form("form_nomina_trabajador"):
+            c1, c2, c3 = st.columns(3)
+            nombre = c1.text_input("Nombre", value=trow["nombre"] if trow else "")
+            cedula = c2.text_input("Cédula", value=trow["cedula"] if trow else "")
+            cargo = c3.text_input("Cargo", value=trow["cargo"] if trow else "")
+
+            c4, c5, c6 = st.columns(3)
+            fecha_ingreso = c4.text_input("Fecha ingreso", value=trow["fecha_ingreso"] if trow else datetime.now().strftime("%d/%m/%Y"))
+            salario = c5.number_input("Salario mensual USD", min_value=0.0, value=float(trow["salario_mensual_usd"] if trow else 250), step=5.0)
+            activo = c6.checkbox("Activo", value=bool(trow["activo"]) if trow else True)
+
+            c7, c8 = st.columns(2)
+            telefono = c7.text_input("Teléfono", value=trow["telefono"] if trow and "telefono" in trow.keys() and trow["telefono"] else "")
+            metodo_pago = c8.text_input("Método/cuenta pago", value=trow["metodo_pago"] if trow and "metodo_pago" in trow.keys() and trow["metodo_pago"] else "")
+            notas = st.text_area("Notas", value=trow["notas"] if trow and "notas" in trow.keys() and trow["notas"] else "")
+
+            guardar = st.form_submit_button("💾 Guardar trabajador", type="primary")
+        if guardar:
+            if not nombre.strip():
+                st.error("El nombre es obligatorio.")
+            elif tid:
+                q("""UPDATE nomina_trabajadores
+                     SET nombre=?,cedula=?,cargo=?,fecha_ingreso=?,salario_mensual_usd=?,activo=?,telefono=?,metodo_pago=?,notas=?,actualizado_en=?
+                     WHERE id=?""",
+                  (nombre.strip(), cedula.strip(), cargo.strip(), fecha_ingreso.strip(), salario, 1 if activo else 0, telefono.strip(), metodo_pago.strip(), notas.strip(), now(), tid))
+                st.success("Trabajador actualizado.")
+                st.rerun()
+            else:
+                q("""INSERT INTO nomina_trabajadores
+                     (nombre,cedula,cargo,fecha_ingreso,salario_mensual_usd,activo,telefono,metodo_pago,notas,creado_en,actualizado_en)
+                     VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                  (nombre.strip(), cedula.strip(), cargo.strip(), fecha_ingreso.strip(), salario, 1 if activo else 0, telefono.strip(), metodo_pago.strip(), notas.strip(), now(), now()))
+                st.success("Trabajador creado.")
+                st.rerun()
+
+    with tab_pago:
+        st.subheader("Generar pago de nómina")
+        trabajadores = nomina_trabajadores_activos()
+        if not trabajadores:
+            st.info("Primero crea al menos un trabajador.")
+        else:
+            opts = {nomina_trabajador_label(t): t for t in trabajadores}
+            sel = st.selectbox("Trabajador", list(opts.keys()), key="nomina_pago_trab")
+            t = opts[sel]
+
+            c1, c2, c3 = st.columns(3)
+            periodo_tipo = c1.selectbox("Período", ["1era quincena", "2da quincena", "Mensual", "Personalizado"], key="nomina_periodo")
+            fecha_pago = c2.text_input("Fecha pago", value=now(), key="nomina_fecha_pago")
+            tasa = c3.number_input("Tasa proveedor", min_value=0.0, value=get_tasa_proveedor(), step=0.01, key="nomina_tasa")
+
+            salario_mensual = float(t["salario_mensual_usd"] or 0)
+            if periodo_tipo in ["1era quincena", "2da quincena"]:
+                base_default = salario_mensual / 2
+            elif periodo_tipo == "Mensual":
+                base_default = salario_mensual
+            else:
+                base_default = 0.0
+
+            c4, c5, c6, c7 = st.columns(4)
+            base_usd = c4.number_input("Base del período USD", min_value=0.0, value=float(base_default), step=5.0)
+            bono_usd = c5.number_input("Bono USD", min_value=0.0, value=0.0, step=5.0, help="Bono simple de control interno. No afecta utilidades automáticamente.")
+            utilidad_usd = c6.number_input("Adelanto utilidades USD", min_value=0.0, value=0.0, step=5.0)
+            adelanto_pend = nomina_adelantos_pendientes(t["id"])
+            descuento_usd = c7.number_input("Descontar adelantos USD", min_value=0.0, max_value=float(adelanto_pend), value=0.0, step=5.0, help=f"Pendiente actual: {money_usd(adelanto_pend)}")
+
+            total_usd = float(base_usd or 0) + float(bono_usd or 0) + float(utilidad_usd or 0) - float(descuento_usd or 0)
+            total_bs = total_usd * float(tasa or 0)
+
+            st.markdown("#### Resumen antes de registrar")
+            r1, r2, r3, r4 = st.columns(4)
+            r1.metric("Base", money_usd(base_usd))
+            r2.metric("Bono", money_usd(bono_usd))
+            r3.metric("Utilidades adelantadas", money_usd(utilidad_usd))
+            r4.metric("Total neto", money_usd(total_usd))
+            st.info(f"Total en Bs a tasa proveedor {float(tasa or 0):,.2f}: {money_bs(total_bs)}")
+            if descuento_usd > 0:
+                st.warning(f"Se descontarán {money_usd(descuento_usd)} de adelantos pendientes.")
+
+            c8, c9 = st.columns(2)
+            metodo_pago = c8.text_input("Método de pago", value=t["metodo_pago"] if "metodo_pago" in t.keys() and t["metodo_pago"] else "")
+            referencia = c9.text_input("Referencia")
+            notas = st.text_area("Notas del pago")
+
+            if st.button("✅ Registrar pago de nómina", type="primary", use_container_width=True):
+                if total_usd < 0:
+                    st.error("El total no puede ser negativo.")
+                else:
+                    q("""INSERT INTO nomina_pagos
+                         (trabajador_id,fecha,periodo,base_usd,bono_usd,utilidad_usd,descuento_adelanto_usd,total_usd,tasa_proveedor,total_bs,metodo_pago,referencia,notas,creado_por,creado_en)
+                         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                      (int(t["id"]), fecha_pago.strip(), periodo_tipo, base_usd, bono_usd, utilidad_usd, descuento_usd, total_usd, tasa, total_bs, metodo_pago.strip(), referencia.strip(), notas.strip(), st.session_state.user["username"], now()))
+                    pago_id = q("SELECT last_insert_rowid() AS id", fetch=True)[0]["id"]
+                    aplicado = nomina_aplicar_descuento_adelantos(t["id"], descuento_usd, pago_id)
+                    st.success(f"Pago de nómina registrado. Adelantos descontados: {money_usd(aplicado)}")
+                    pdf = generar_pdf_nomina_pago(pago_id)
+                    st.download_button("📄 Descargar recibo PDF", data=pdf, file_name=f"recibo_nomina_{int(pago_id):04d}.pdf", mime="application/pdf", use_container_width=True)
+
+    with tab_adel:
+        st.subheader("Adelantos de sueldo")
+        trabajadores = nomina_trabajadores_activos()
+        if not trabajadores:
+            st.info("Primero crea trabajadores.")
+        else:
+            opts = {nomina_trabajador_label(t): t for t in trabajadores}
+            sel = st.selectbox("Trabajador", list(opts.keys()), key="nomina_adel_trab")
+            t = opts[sel]
+            c1, c2, c3 = st.columns(3)
+            fecha = c1.text_input("Fecha", value=now(), key="nomina_adel_fecha")
+            monto = c2.number_input("Monto adelanto USD", min_value=0.0, value=0.0, step=5.0)
+            tasa = c3.number_input("Tasa proveedor", min_value=0.0, value=get_tasa_proveedor(), step=0.01, key="nomina_adel_tasa")
+            motivo = st.text_area("Motivo / notas del adelanto")
+            st.info(f"Monto en Bs: {money_bs(monto * tasa)}")
+            if st.button("➕ Registrar adelanto", type="primary", use_container_width=True):
+                if monto <= 0:
+                    st.error("El monto debe ser mayor a 0.")
+                else:
+                    q("""INSERT INTO nomina_adelantos
+                         (trabajador_id,fecha,monto_usd,tasa_proveedor,monto_bs,saldo_usd,estado,motivo,creado_en)
+                         VALUES (?,?,?,?,?,?,?,?,?)""",
+                      (int(t["id"]), fecha.strip(), monto, tasa, monto*tasa, monto, "Pendiente", motivo.strip(), now()))
+                    st.success("Adelanto registrado.")
+                    st.rerun()
+
+        df_ad = pd.read_sql_query("""SELECT a.id,t.nombre,a.fecha,a.monto_usd,a.saldo_usd,a.estado,a.motivo
+                                     FROM nomina_adelantos a
+                                     LEFT JOIN nomina_trabajadores t ON t.id=a.trabajador_id
+                                     ORDER BY a.id DESC""", get_conn())
+        if not df_ad.empty:
+            st.markdown("#### Histórico de adelantos")
+            st.dataframe(df_ad, use_container_width=True, hide_index=True,
+                         column_config={"monto_usd": st.column_config.NumberColumn(format="$%.2f"), "saldo_usd": st.column_config.NumberColumn(format="$%.2f")})
+
+    with tab_util:
+        st.subheader("Utilidades / adelantos de fin de año")
+        dias_util = st.number_input("Días de utilidades estimadas", min_value=1, max_value=120, value=int(parse_float(get_config("nomina_dias_utilidades", "30"), 30)), step=1)
+        if st.button("💾 Guardar días de utilidades", use_container_width=True):
+            set_config("nomina_dias_utilidades", dias_util)
+            st.success("Configuración guardada.")
+            st.rerun()
+
+        anio = st.number_input("Año", min_value=2020, max_value=2100, value=datetime.now().year, step=1)
+        trabajadores = nomina_trabajadores_activos(incluir_inactivos=True)
+        data = []
+        for t in trabajadores:
+            estimado = float(t["salario_mensual_usd"] or 0) / 30 * float(dias_util or 30)
+            pagado = nomina_utilidades_pagadas(t["id"], int(anio))
+            data.append({
+                "Trabajador": t["nombre"],
+                "Salario mensual": float(t["salario_mensual_usd"] or 0),
+                "Utilidades estimadas": estimado,
+                "Adelantado": pagado,
+                "Saldo pendiente": max(0.0, estimado - pagado),
+                "Activo": int(t["activo"] or 0),
+            })
+        if data:
+            st.dataframe(pd.DataFrame(data), use_container_width=True, hide_index=True,
+                         column_config={
+                             "Salario mensual": st.column_config.NumberColumn(format="$%.2f"),
+                             "Utilidades estimadas": st.column_config.NumberColumn(format="$%.2f"),
+                             "Adelantado": st.column_config.NumberColumn(format="$%.2f"),
+                             "Saldo pendiente": st.column_config.NumberColumn(format="$%.2f"),
+                         })
+        else:
+            st.info("No hay trabajadores registrados.")
+
+    with tab_hist:
+        st.subheader("Histórico de pagos")
+        bus = st.text_input("Buscar histórico", placeholder="Trabajador, período, referencia...")
+        sql = """SELECT p.id,p.fecha,t.nombre,p.periodo,p.base_usd,p.bono_usd,p.utilidad_usd,p.descuento_adelanto_usd,p.total_usd,p.tasa_proveedor,p.total_bs,p.metodo_pago,p.referencia,p.creado_por
+                 FROM nomina_pagos p
+                 LEFT JOIN nomina_trabajadores t ON t.id=p.trabajador_id
+                 WHERE 1=1"""
+        params = []
+        if bus:
+            sql += " AND (t.nombre LIKE ? OR p.periodo LIKE ? OR p.referencia LIKE ?)"
+            params.extend([f"%{bus}%", f"%{bus}%", f"%{bus}%"])
+        sql += " ORDER BY p.id DESC"
+        df = pd.read_sql_query(sql, get_conn(), params=params)
+        if df.empty:
+            st.info("Sin pagos registrados.")
+        else:
+            st.dataframe(df, use_container_width=True, hide_index=True,
+                         column_config={
+                             "base_usd": st.column_config.NumberColumn(format="$%.2f"),
+                             "bono_usd": st.column_config.NumberColumn(format="$%.2f"),
+                             "utilidad_usd": st.column_config.NumberColumn(format="$%.2f"),
+                             "descuento_adelanto_usd": st.column_config.NumberColumn(format="$%.2f"),
+                             "total_usd": st.column_config.NumberColumn(format="$%.2f"),
+                             "total_bs": st.column_config.NumberColumn(format="%.2f"),
+                         })
+            pagos = q("SELECT id FROM nomina_pagos ORDER BY id DESC LIMIT 100", fetch=True)
+            if pagos:
+                ids = [int(p["id"]) for p in pagos]
+                pid = st.selectbox("Descargar recibo", ids, format_func=lambda x: f"Recibo nómina #{x}")
+                pdf = generar_pdf_nomina_pago(int(pid))
+                st.download_button("📄 Descargar recibo PDF", data=pdf, file_name=f"recibo_nomina_{int(pid):04d}.pdf", mime="application/pdf", use_container_width=True)
+
+
+
 def reportes():
     st.title("📈 Reportes")
 
@@ -6336,7 +6793,7 @@ with st.sidebar:
 
     opciones = ["Mi cuenta", "Tienda", "Carrito", "Mis pedidos", "Mis créditos", "Mis pagos", "Mi perfil"]
     if user["rol"] == "admin":
-        opciones += ["Centro admin", "Dashboard", "Control POS", "Rentabilidad", "Publicaciones", "Vendedores", "Productos", "Categorías", "Cotizaciones", "Usuarios", "Métodos de pago", "Validar créditos", "Reportes", "Configuración", "Respaldo"]
+        opciones += ["Centro admin", "Dashboard", "Control POS", "Rentabilidad", "Nómina", "Publicaciones", "Vendedores", "Productos", "Categorías", "Cotizaciones", "Usuarios", "Métodos de pago", "Validar créditos", "Reportes", "Configuración", "Respaldo"]
     elif user["rol"] == "vendedor":
         opciones += ["Publicaciones", "Vendedores"]
     elif user["rol"] == "vendedor_mercadolibre":
@@ -6385,6 +6842,8 @@ elif menu == "Control POS":
     control_pos()
 elif menu == "Rentabilidad":
     rentabilidad_productos()
+elif menu == "Nómina":
+    nomina_admin()
 elif menu == "Publicaciones":
     publicaciones()
 elif menu == "Vendedores":
