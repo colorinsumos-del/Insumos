@@ -41,7 +41,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V75 Nómina Admin Simple"
+APP_NAME = "Sistema de Insumos al Mayor V76 Nómina Pago Móvil y Duplicar Fix"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -701,6 +701,11 @@ def init_db():
         activo INTEGER DEFAULT 1,
         telefono TEXT,
         metodo_pago TEXT,
+        banco TEXT,
+        titular_pago TEXT,
+        cedula_rif_pago TEXT,
+        telefono_pago_movil TEXT,
+        tipo_cuenta_pago TEXT,
         notas TEXT,
         creado_en TEXT,
         actualizado_en TEXT
@@ -884,6 +889,11 @@ def init_db():
     try:
         add_col("nomina_trabajadores", "telefono", "TEXT")
         add_col("nomina_trabajadores", "metodo_pago", "TEXT")
+        add_col("nomina_trabajadores", "banco", "TEXT")
+        add_col("nomina_trabajadores", "titular_pago", "TEXT")
+        add_col("nomina_trabajadores", "cedula_rif_pago", "TEXT")
+        add_col("nomina_trabajadores", "telefono_pago_movil", "TEXT")
+        add_col("nomina_trabajadores", "tipo_cuenta_pago", "TEXT")
         add_col("nomina_trabajadores", "notas", "TEXT")
         add_col("nomina_trabajadores", "actualizado_en", "TEXT")
         add_col("nomina_adelantos", "pago_id", "INTEGER DEFAULT 0")
@@ -3298,7 +3308,11 @@ def admin_usuarios():
                         if existe:
                             st.error("Ya existe un producto con ese SKU.")
                         else:
-                            data = dict(prod_base)
+                            try:
+                                data = dict(prod_base)
+                            except Exception:
+                                data = {k: prod_base[k] for k in prod_base.keys()}
+
                             data["sku"] = nuevo_sku.strip()
                             data["descripcion"] = nuevo_nombre.strip()
                             data["activo"] = 1 if activo_nuevo else 0
@@ -3307,16 +3321,21 @@ def admin_usuarios():
                             data["ultima_sync"] = ""
                             if not copiar_imagen:
                                 data["wc_imagen_url"] = ""
-                            # Evitar copiar campos calculados/externos innecesarios si existen.
+
+                            # Duplicado seguro: usar solo columnas reales de productos y evitar valores raros.
                             cols = [c[1] for c in q("PRAGMA table_info(productos)", fetch=True)]
                             insert_cols = [c for c in cols if c in data]
                             placeholders = ",".join(["?"] * len(insert_cols))
                             col_sql = ",".join(insert_cols)
-                            vals = [data[c] for c in insert_cols]
-                            q(f"INSERT INTO productos ({col_sql}) VALUES ({placeholders})", vals)
-                            st.session_state["sku_producto_editar"] = nuevo_sku.strip()
-                            st.success("Producto duplicado. Ya quedó cargado para editar en la pestaña Crear / Editar.")
-                            st.rerun()
+                            vals = tuple(data[c] for c in insert_cols)
+
+                            try:
+                                q(f"INSERT INTO productos ({col_sql}) VALUES ({placeholders})", vals)
+                                st.session_state["sku_producto_editar"] = nuevo_sku.strip()
+                                set_feedback(f"Producto duplicado correctamente: {nuevo_sku.strip()}. Ya quedó cargado en Crear / Editar.", "success")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"No se pudo duplicar el producto: {e}")
 
 
 def admin_cotizaciones():
@@ -4663,6 +4682,39 @@ def nomina_trabajador_label(t):
     estado = "" if int(t["activo"] or 0) == 1 else " (inactivo)"
     return f"{t['nombre']} — {t['cargo'] or 'Sin cargo'} — {money_usd(t['salario_mensual_usd'])}{estado}"
 
+def nomina_pago_movil_label(t):
+    banco = ""
+    titular = ""
+    cedula = ""
+    telefono_pm = ""
+    try:
+        banco = t["banco"] if "banco" in t.keys() and t["banco"] else ""
+        titular = t["titular_pago"] if "titular_pago" in t.keys() and t["titular_pago"] else ""
+        cedula = t["cedula_rif_pago"] if "cedula_rif_pago" in t.keys() and t["cedula_rif_pago"] else ""
+        telefono_pm = t["telefono_pago_movil"] if "telefono_pago_movil" in t.keys() and t["telefono_pago_movil"] else ""
+    except Exception:
+        pass
+    partes = []
+    if banco:
+        partes.append(f"Banco: {banco}")
+    if titular:
+        partes.append(f"Titular: {titular}")
+    if cedula:
+        partes.append(f"CI/RIF: {cedula}")
+    if telefono_pm:
+        partes.append(f"Tel: {telefono_pm}")
+    return "Pago móvil" + (f" · {' · '.join(partes)}" if partes else "")
+
+def render_nomina_pago_movil_card(t):
+    st.markdown("##### Datos de pago móvil del trabajador")
+    c1, c2 = st.columns(2)
+    banco = t["banco"] if "banco" in t.keys() and t["banco"] else "No definido"
+    titular = t["titular_pago"] if "titular_pago" in t.keys() and t["titular_pago"] else (t["nombre"] or "No definido")
+    cedula = t["cedula_rif_pago"] if "cedula_rif_pago" in t.keys() and t["cedula_rif_pago"] else (t["cedula"] or "No definida")
+    telpm = t["telefono_pago_movil"] if "telefono_pago_movil" in t.keys() and t["telefono_pago_movil"] else "No definido"
+    c1.info(f"Banco: **{banco}**\n\nTitular: **{titular}**")
+    c2.info(f"Cédula/RIF: **{cedula}**\n\nTeléfono pago móvil: **{telpm}**")
+
 def nomina_anio_de_fecha(fecha_txt):
     try:
         return datetime.strptime(str(fecha_txt)[:10], "%d/%m/%Y").year
@@ -4704,7 +4756,8 @@ def nomina_aplicar_descuento_adelantos(trabajador_id, monto_usd, pago_id):
     return aplicado
 
 def generar_pdf_nomina_pago(pago_id):
-    rows = q("""SELECT p.*, t.nombre, t.cedula, t.cargo, t.salario_mensual_usd
+    rows = q("""SELECT p.*, t.nombre, t.cedula, t.cargo, t.salario_mensual_usd,
+                       t.banco, t.titular_pago, t.cedula_rif_pago, t.telefono_pago_movil
                 FROM nomina_pagos p
                 LEFT JOIN nomina_trabajadores t ON t.id=p.trabajador_id
                 WHERE p.id=?""", (int(pago_id),), fetch=True)
@@ -4755,6 +4808,10 @@ def generar_pdf_nomina_pago(pago_id):
     pdf.cell(190, 6, pdf_clean(f"Tasa proveedor usada: {float(p['tasa_proveedor'] or 0):,.2f}"), ln=1)
     pdf.cell(190, 6, pdf_clean(f"Total pagado en Bs: {money_bs(p['total_bs'])}"), ln=1)
     pdf.cell(190, 6, pdf_clean(f"Metodo: {p['metodo_pago'] or 'N/A'} | Referencia: {p['referencia'] or 'N/A'}"), ln=1)
+    if p["banco"] or p["titular_pago"] or p["cedula_rif_pago"] or p["telefono_pago_movil"]:
+        pdf.multi_cell(190, 5, pdf_clean(
+            f"Pago movil trabajador: Banco {p['banco'] or 'N/A'} | Titular {p['titular_pago'] or 'N/A'} | CI/RIF {p['cedula_rif_pago'] or 'N/A'} | Telefono {p['telefono_pago_movil'] or 'N/A'}"
+        ))
     if p["notas"]:
         pdf.multi_cell(190, 5, pdf_clean(f"Notas: {p['notas']}"))
 
@@ -4832,7 +4889,7 @@ def nomina_admin():
         rows = nomina_trabajadores_activos(incluir_inactivos=True)
         if rows:
             df = pd.DataFrame([dict(r) for r in rows])
-            st.dataframe(df[["id","nombre","cedula","cargo","fecha_ingreso","salario_mensual_usd","activo","telefono","metodo_pago"]], use_container_width=True, hide_index=True,
+            st.dataframe(df[["id","nombre","cedula","cargo","fecha_ingreso","salario_mensual_usd","activo","telefono","banco","titular_pago","cedula_rif_pago","telefono_pago_movil"]], use_container_width=True, hide_index=True,
                          column_config={"salario_mensual_usd": st.column_config.NumberColumn(format="$%.2f")})
         else:
             st.info("Todavía no hay trabajadores.")
@@ -4856,9 +4913,26 @@ def nomina_admin():
             salario = c5.number_input("Salario mensual USD", min_value=0.0, value=float(trow["salario_mensual_usd"] if trow else 250), step=5.0)
             activo = c6.checkbox("Activo", value=bool(trow["activo"]) if trow else True)
 
-            c7, c8 = st.columns(2)
-            telefono = c7.text_input("Teléfono", value=trow["telefono"] if trow and "telefono" in trow.keys() and trow["telefono"] else "")
-            metodo_pago = c8.text_input("Método/cuenta pago", value=trow["metodo_pago"] if trow and "metodo_pago" in trow.keys() and trow["metodo_pago"] else "")
+            st.markdown("#### Datos de pago móvil")
+            c7, c8, c9 = st.columns(3)
+            telefono = c7.text_input("Teléfono contacto", value=trow["telefono"] if trow and "telefono" in trow.keys() and trow["telefono"] else "")
+            banco = c8.text_input("Banco", value=trow["banco"] if trow and "banco" in trow.keys() and trow["banco"] else "")
+            titular_pago = c9.text_input("Titular", value=trow["titular_pago"] if trow and "titular_pago" in trow.keys() and trow["titular_pago"] else (trow["nombre"] if trow else ""))
+
+            c10, c11, c12 = st.columns(3)
+            cedula_rif_pago = c10.text_input("Cédula/RIF pago móvil", value=trow["cedula_rif_pago"] if trow and "cedula_rif_pago" in trow.keys() and trow["cedula_rif_pago"] else (trow["cedula"] if trow else ""))
+            telefono_pago_movil = c11.text_input("Teléfono pago móvil", value=trow["telefono_pago_movil"] if trow and "telefono_pago_movil" in trow.keys() and trow["telefono_pago_movil"] else "")
+            tipo_cuenta_pago = c12.text_input("Tipo cuenta / nota", value=trow["tipo_cuenta_pago"] if trow and "tipo_cuenta_pago" in trow.keys() and trow["tipo_cuenta_pago"] else "")
+
+            metodo_pago = nomina_pago_movil_label({
+                "banco": banco,
+                "titular_pago": titular_pago,
+                "cedula_rif_pago": cedula_rif_pago,
+                "telefono_pago_movil": telefono_pago_movil,
+                "nombre": nombre,
+                "cedula": cedula,
+            })
+            st.caption(f"Método generado: {metodo_pago}")
             notas = st.text_area("Notas", value=trow["notas"] if trow and "notas" in trow.keys() and trow["notas"] else "")
 
             guardar = st.form_submit_button("💾 Guardar trabajador", type="primary")
@@ -4867,16 +4941,20 @@ def nomina_admin():
                 st.error("El nombre es obligatorio.")
             elif tid:
                 q("""UPDATE nomina_trabajadores
-                     SET nombre=?,cedula=?,cargo=?,fecha_ingreso=?,salario_mensual_usd=?,activo=?,telefono=?,metodo_pago=?,notas=?,actualizado_en=?
+                     SET nombre=?,cedula=?,cargo=?,fecha_ingreso=?,salario_mensual_usd=?,activo=?,telefono=?,metodo_pago=?,
+                         banco=?,titular_pago=?,cedula_rif_pago=?,telefono_pago_movil=?,tipo_cuenta_pago=?,notas=?,actualizado_en=?
                      WHERE id=?""",
-                  (nombre.strip(), cedula.strip(), cargo.strip(), fecha_ingreso.strip(), salario, 1 if activo else 0, telefono.strip(), metodo_pago.strip(), notas.strip(), now(), tid))
+                  (nombre.strip(), cedula.strip(), cargo.strip(), fecha_ingreso.strip(), salario, 1 if activo else 0, telefono.strip(), metodo_pago.strip(),
+                   banco.strip(), titular_pago.strip(), cedula_rif_pago.strip(), telefono_pago_movil.strip(), tipo_cuenta_pago.strip(), notas.strip(), now(), tid))
                 st.success("Trabajador actualizado.")
                 st.rerun()
             else:
                 q("""INSERT INTO nomina_trabajadores
-                     (nombre,cedula,cargo,fecha_ingreso,salario_mensual_usd,activo,telefono,metodo_pago,notas,creado_en,actualizado_en)
-                     VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-                  (nombre.strip(), cedula.strip(), cargo.strip(), fecha_ingreso.strip(), salario, 1 if activo else 0, telefono.strip(), metodo_pago.strip(), notas.strip(), now(), now()))
+                     (nombre,cedula,cargo,fecha_ingreso,salario_mensual_usd,activo,telefono,metodo_pago,
+                      banco,titular_pago,cedula_rif_pago,telefono_pago_movil,tipo_cuenta_pago,notas,creado_en,actualizado_en)
+                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                  (nombre.strip(), cedula.strip(), cargo.strip(), fecha_ingreso.strip(), salario, 1 if activo else 0, telefono.strip(), metodo_pago.strip(),
+                   banco.strip(), titular_pago.strip(), cedula_rif_pago.strip(), telefono_pago_movil.strip(), tipo_cuenta_pago.strip(), notas.strip(), now(), now()))
                 st.success("Trabajador creado.")
                 st.rerun()
 
@@ -4923,8 +5001,10 @@ def nomina_admin():
             if descuento_usd > 0:
                 st.warning(f"Se descontarán {money_usd(descuento_usd)} de adelantos pendientes.")
 
+            render_nomina_pago_movil_card(t)
+            metodo_default = nomina_pago_movil_label(t)
             c8, c9 = st.columns(2)
-            metodo_pago = c8.text_input("Método de pago", value=t["metodo_pago"] if "metodo_pago" in t.keys() and t["metodo_pago"] else "")
+            metodo_pago = c8.text_input("Método de pago", value=metodo_default)
             referencia = c9.text_input("Referencia")
             notas = st.text_area("Notas del pago")
 
