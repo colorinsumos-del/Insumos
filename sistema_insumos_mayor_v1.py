@@ -41,7 +41,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V76 Nómina Pago Móvil y Duplicar Fix"
+APP_NAME = "Sistema de Insumos al Mayor V77 Fix1 Usuarios y Duplicar"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -594,6 +594,13 @@ def init_db():
         maneja_bulto INTEGER DEFAULT 1,
         peso_unidad_kg REAL DEFAULT 0,
         activo INTEGER DEFAULT 1,
+        visible_tienda INTEGER DEFAULT 1,
+        es_variante INTEGER DEFAULT 0,
+        grupo_variantes TEXT,
+        nombre_visible_grupo TEXT,
+        atributo_medida TEXT,
+        atributo_color TEXT,
+        orden_variante INTEGER DEFAULT 0,
         wc_product_id INTEGER,
         wc_nombre TEXT,
         wc_stock INTEGER DEFAULT 0,
@@ -854,6 +861,14 @@ def init_db():
     add_col("productos", "link_marketplace", "TEXT")
     add_col("productos", "link_whatsapp", "TEXT")
     add_col("productos", "notas_publicacion", "TEXT")
+    # V77: producto visible en tienda y variantes agrupadas.
+    add_col("productos", "visible_tienda", "INTEGER DEFAULT 1")
+    add_col("productos", "es_variante", "INTEGER DEFAULT 0")
+    add_col("productos", "grupo_variantes", "TEXT")
+    add_col("productos", "nombre_visible_grupo", "TEXT")
+    add_col("productos", "atributo_medida", "TEXT")
+    add_col("productos", "atributo_color", "TEXT")
+    add_col("productos", "orden_variante", "INTEGER DEFAULT 0")
     add_col("pedidos", "pos_procesado", "INTEGER DEFAULT 0")
     add_col("pedidos", "pos_fecha", "TEXT")
     add_col("pedidos", "pos_usuario", "TEXT")
@@ -2831,7 +2846,7 @@ def admin_productos():
             params.extend([f"%{bus}%", f"%{bus}%"])
         sql += " ORDER BY p.activo DESC, c.orden, p.descripcion"
         df = pd.read_sql_query(sql, get_conn(), params=params)
-        cols_prod = ["sku","descripcion","categoria","precio_unidad","presentacion_intermedia_nombre","presentacion_intermedia_cantidad","precio_docena","precio_bulto","maneja_precio_especial","precio_especial_unidad","precio_especial_docena","precio_especial_bulto","bulto_contiene","peso_unidad_kg","wc_stock","activo","ultima_sync"]
+        cols_prod = ["sku","descripcion","categoria","precio_unidad","presentacion_intermedia_nombre","presentacion_intermedia_cantidad","precio_docena","precio_bulto","bulto_contiene","peso_unidad_kg","wc_stock","activo","visible_tienda","es_variante","grupo_variantes","nombre_visible_grupo","atributo_medida","atributo_color","orden_variante","ultima_sync"]
         st.dataframe(
             df[cols_prod],
             use_container_width=True,
@@ -2853,7 +2868,7 @@ def admin_productos():
             prod_accion = prod_accion[0] if prod_accion else None
 
             if prod_accion:
-                a1, a2, a3 = st.columns(3)
+                a1, a2, a3, a4 = st.columns(4)
                 if a1.button("✏️ Cargar en edición", use_container_width=True, key=f"load_edit_{sku_accion}"):
                     st.session_state["sku_producto_editar"] = sku_accion
                     st.success("Producto cargado. Abre la pestaña Crear / Editar para modificarlo.")
@@ -2863,7 +2878,13 @@ def admin_productos():
                     q("UPDATE productos SET activo=?, actualizado_en=? WHERE sku=?", (0 if activo_actual else 1, now(), sku_accion))
                     st.success("Estado del producto actualizado.")
                     st.rerun()
-                if a3.button("🔄 Sync WooCommerce", use_container_width=True, key=f"sync_prod_{sku_accion}"):
+                visible_actual = int(prod_accion["visible_tienda"] if "visible_tienda" in prod_accion.keys() and prod_accion["visible_tienda"] is not None else 1) == 1
+                texto_visible = "🙈 Ocultar tienda" if visible_actual else "👁️ Mostrar tienda"
+                if a3.button(texto_visible, use_container_width=True, key=f"toggle_visible_{sku_accion}"):
+                    q("UPDATE productos SET visible_tienda=?, actualizado_en=? WHERE sku=?", (0 if visible_actual else 1, now(), sku_accion))
+                    st.success("Visibilidad en tienda actualizada.")
+                    st.rerun()
+                if a4.button("🔄 Sync WC", use_container_width=True, key=f"sync_prod_{sku_accion}"):
                     ok, msg = sync_producto_wc(sku_accion)
                     st.success(msg) if ok else st.warning(msg)
                     st.rerun()
@@ -2942,6 +2963,50 @@ def admin_productos():
             )
             activo = c11.checkbox("Producto activo", value=bool(prod["activo"]) if prod else True)
 
+            st.markdown("#### Visibilidad y variantes")
+            vv1, vv2, vv3 = st.columns(3)
+            visible_tienda = vv1.checkbox(
+                "Visible en tienda",
+                value=bool(prod["visible_tienda"] if prod and "visible_tienda" in prod.keys() and prod["visible_tienda"] is not None else 1),
+                help="Si lo desmarcas, no se mostrará como publicación individual. Si es variante agrupada, puede seguir apareciendo dentro del grupo mientras esté activo."
+            )
+            es_variante = vv2.checkbox(
+                "Es variante agrupada",
+                value=bool(prod["es_variante"] if prod and "es_variante" in prod.keys() and prod["es_variante"] is not None else 0),
+                help="Úsalo para productos con SKU propio que pertenecen a una familia, por ejemplo anillos por medida/color."
+            )
+            orden_variante = vv3.number_input(
+                "Orden variante",
+                min_value=0,
+                max_value=9999,
+                value=int(prod["orden_variante"] if prod and "orden_variante" in prod.keys() and prod["orden_variante"] is not None else 0),
+                step=1
+            )
+
+            vg1, vg2 = st.columns(2)
+            grupo_variantes = vg1.text_input(
+                "Grupo variantes",
+                value=prod["grupo_variantes"] if prod and "grupo_variantes" in prod.keys() and prod["grupo_variantes"] else "",
+                placeholder="Ej: ANILLOS_AGENDA"
+            )
+            nombre_visible_grupo = vg2.text_input(
+                "Nombre visible del grupo",
+                value=prod["nombre_visible_grupo"] if prod and "nombre_visible_grupo" in prod.keys() and prod["nombre_visible_grupo"] else "",
+                placeholder="Ej: Anillos para agenda"
+            )
+
+            va1, va2 = st.columns(2)
+            atributo_medida = va1.text_input(
+                "Medida",
+                value=prod["atributo_medida"] if prod and "atributo_medida" in prod.keys() and prod["atributo_medida"] else "",
+                placeholder='Ej: 7/8, 3/4, 1"'
+            )
+            atributo_color = va2.text_input(
+                "Color",
+                value=prod["atributo_color"] if prod and "atributo_color" in prod.keys() and prod["atributo_color"] else "",
+                placeholder="Ej: Negro, Blanco, Dorado, Rosado"
+            )
+
             st.markdown("#### Costos internos / rentabilidad")
             cc1, cc2, cc3, cc4 = st.columns(4)
             costo_proveedor_unitario = cc1.number_input("Costo proveedor unitario", min_value=0.0, value=float(prod["costo_proveedor_unitario"] if prod and "costo_proveedor_unitario" in prod.keys() else 0), step=0.01)
@@ -3018,6 +3083,12 @@ def admin_productos():
                    1 if pub_web else 0, 1 if pub_instagram else 0, 1 if pub_mercadolibre else 0, 1 if pub_marketplace else 0, 1 if pub_whatsapp else 0,
                    link_instagram, link_mercadolibre, link_marketplace, notas_publicacion,
                    now(), now()))
+                q("""UPDATE productos
+                     SET visible_tienda=?, es_variante=?, grupo_variantes=?, nombre_visible_grupo=?,
+                         atributo_medida=?, atributo_color=?, orden_variante=?, actualizado_en=?
+                     WHERE sku=?""",
+                  (1 if visible_tienda else 0, 1 if es_variante else 0, grupo_variantes.strip(), nombre_visible_grupo.strip(),
+                   atributo_medida.strip(), atributo_color.strip(), int(orden_variante), now(), sku_e.strip()))
                 st.success("Producto guardado.")
                 set_feedback(f"Producto guardado correctamente: {sku_e.strip()}.", "success")
                 try:
@@ -3064,6 +3135,74 @@ def admin_productos():
                     q("DELETE FROM productos WHERE sku=?", (prod["sku"],))
                     st.success("Producto eliminado.")
                     st.rerun()
+
+    with tab_dup:
+        st.subheader("Duplicar producto")
+        st.caption("Crea un producto nuevo copiando datos de otro. El producto original no se modifica.")
+
+        bus_dup = st.text_input("Buscar producto a duplicar", placeholder="Nombre o SKU...", key="bus_dup_producto")
+        rows_dup = []
+        if bus_dup:
+            rows_dup = q("""SELECT sku,descripcion FROM productos
+                            WHERE sku LIKE ? OR descripcion LIKE ?
+                            ORDER BY descripcion LIMIT 50""",
+                         (f"%{bus_dup}%", f"%{bus_dup}%"), fetch=True)
+        else:
+            rows_dup = q("SELECT sku,descripcion FROM productos ORDER BY descripcion LIMIT 50", fetch=True)
+
+        if not rows_dup:
+            st.info("No hay productos para duplicar con esa búsqueda.")
+        else:
+            opts_dup = {f"{r['descripcion']} — {r['sku']}": r["sku"] for r in rows_dup}
+            sel_dup = st.selectbox("Producto base", list(opts_dup.keys()), key="sel_dup_producto")
+            sku_base = opts_dup[sel_dup]
+            prod_base_rows = q("SELECT * FROM productos WHERE sku=?", (sku_base,), fetch=True)
+            prod_base = prod_base_rows[0] if prod_base_rows else None
+
+            if prod_base:
+                nuevo_sku = st.text_input("Nuevo SKU", key="dup_nuevo_sku")
+                nuevo_nombre = st.text_input("Nueva descripción", value=f"{prod_base['descripcion']} COPIA", key="dup_nuevo_nombre")
+                copiar_imagen = st.checkbox("Copiar URL de imagen WooCommerce", value=True, key="dup_copiar_img")
+                activo_nuevo = st.checkbox("Crear producto activo", value=False, key="dup_activo")
+                st.info("Recomendación: créalo inactivo, revisa precios/peso/categoría y luego actívalo.")
+
+                if st.button("📄 Duplicar producto", type="primary", use_container_width=True, key="btn_dup_producto"):
+                    if not nuevo_sku.strip() or not nuevo_nombre.strip():
+                        st.error("Nuevo SKU y nueva descripción son obligatorios.")
+                    else:
+                        existe = q("SELECT sku FROM productos WHERE sku=?", (nuevo_sku.strip(),), fetch=True)
+                        if existe:
+                            st.error("Ya existe un producto con ese SKU.")
+                        else:
+                            try:
+                                data = dict(prod_base)
+                            except Exception:
+                                data = {k: prod_base[k] for k in prod_base.keys()}
+
+                            data["sku"] = nuevo_sku.strip()
+                            data["descripcion"] = nuevo_nombre.strip()
+                            data["activo"] = 1 if activo_nuevo else 0
+                            data["creado_en"] = now()
+                            data["actualizado_en"] = now()
+                            data["ultima_sync"] = ""
+                            if not copiar_imagen:
+                                data["wc_imagen_url"] = ""
+
+                            # Duplicado seguro: usar solo columnas reales de productos y evitar valores raros.
+                            cols = [c[1] for c in q("PRAGMA table_info(productos)", fetch=True)]
+                            insert_cols = [c for c in cols if c in data]
+                            placeholders = ",".join(["?"] * len(insert_cols))
+                            col_sql = ",".join(insert_cols)
+                            vals = tuple(data[c] for c in insert_cols)
+
+                            try:
+                                q(f"INSERT INTO productos ({col_sql}) VALUES ({placeholders})", vals)
+                                st.session_state["sku_producto_editar"] = nuevo_sku.strip()
+                                set_feedback(f"Producto duplicado correctamente: {nuevo_sku.strip()}. Ya quedó cargado en Crear / Editar.", "success")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"No se pudo duplicar el producto: {e}")
+
 
 def mi_perfil():
     st.title("👤 Mi perfil")
@@ -3269,73 +3408,6 @@ def admin_usuarios():
             else:
                 st.error(msg)
 
-
-    with tab_dup:
-        st.subheader("Duplicar producto")
-        st.caption("Crea un producto nuevo copiando datos de otro. El producto original no se modifica.")
-
-        bus_dup = st.text_input("Buscar producto a duplicar", placeholder="Nombre o SKU...", key="bus_dup_producto")
-        rows_dup = []
-        if bus_dup:
-            rows_dup = q("""SELECT sku,descripcion FROM productos
-                            WHERE sku LIKE ? OR descripcion LIKE ?
-                            ORDER BY descripcion LIMIT 50""",
-                         (f"%{bus_dup}%", f"%{bus_dup}%"), fetch=True)
-        else:
-            rows_dup = q("SELECT sku,descripcion FROM productos ORDER BY descripcion LIMIT 50", fetch=True)
-
-        if not rows_dup:
-            st.info("No hay productos para duplicar con esa búsqueda.")
-        else:
-            opts_dup = {f"{r['descripcion']} — {r['sku']}": r["sku"] for r in rows_dup}
-            sel_dup = st.selectbox("Producto base", list(opts_dup.keys()), key="sel_dup_producto")
-            sku_base = opts_dup[sel_dup]
-            prod_base_rows = q("SELECT * FROM productos WHERE sku=?", (sku_base,), fetch=True)
-            prod_base = prod_base_rows[0] if prod_base_rows else None
-
-            if prod_base:
-                nuevo_sku = st.text_input("Nuevo SKU", key="dup_nuevo_sku")
-                nuevo_nombre = st.text_input("Nueva descripción", value=f"{prod_base['descripcion']} COPIA", key="dup_nuevo_nombre")
-                copiar_imagen = st.checkbox("Copiar URL de imagen WooCommerce", value=True, key="dup_copiar_img")
-                activo_nuevo = st.checkbox("Crear producto activo", value=False, key="dup_activo")
-                st.info("Recomendación: créalo inactivo, revisa precios/peso/categoría y luego actívalo.")
-
-                if st.button("📄 Duplicar producto", type="primary", use_container_width=True, key="btn_dup_producto"):
-                    if not nuevo_sku.strip() or not nuevo_nombre.strip():
-                        st.error("Nuevo SKU y nueva descripción son obligatorios.")
-                    else:
-                        existe = q("SELECT sku FROM productos WHERE sku=?", (nuevo_sku.strip(),), fetch=True)
-                        if existe:
-                            st.error("Ya existe un producto con ese SKU.")
-                        else:
-                            try:
-                                data = dict(prod_base)
-                            except Exception:
-                                data = {k: prod_base[k] for k in prod_base.keys()}
-
-                            data["sku"] = nuevo_sku.strip()
-                            data["descripcion"] = nuevo_nombre.strip()
-                            data["activo"] = 1 if activo_nuevo else 0
-                            data["creado_en"] = now()
-                            data["actualizado_en"] = now()
-                            data["ultima_sync"] = ""
-                            if not copiar_imagen:
-                                data["wc_imagen_url"] = ""
-
-                            # Duplicado seguro: usar solo columnas reales de productos y evitar valores raros.
-                            cols = [c[1] for c in q("PRAGMA table_info(productos)", fetch=True)]
-                            insert_cols = [c for c in cols if c in data]
-                            placeholders = ",".join(["?"] * len(insert_cols))
-                            col_sql = ",".join(insert_cols)
-                            vals = tuple(data[c] for c in insert_cols)
-
-                            try:
-                                q(f"INSERT INTO productos ({col_sql}) VALUES ({placeholders})", vals)
-                                st.session_state["sku_producto_editar"] = nuevo_sku.strip()
-                                set_feedback(f"Producto duplicado correctamente: {nuevo_sku.strip()}. Ya quedó cargado en Crear / Editar.", "success")
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"No se pudo duplicar el producto: {e}")
 
 
 def admin_cotizaciones():
@@ -6087,6 +6159,85 @@ def render_card_producto(prod, user, cliente_precio=None):
     st.markdown("</div>", unsafe_allow_html=True)
 
 
+def producto_es_variante_agrupada(prod):
+    try:
+        return int(prod["es_variante"] or 0) == 1 and str(prod["grupo_variantes"] or "").strip() != ""
+    except Exception:
+        return False
+
+def producto_visible_tienda(prod):
+    try:
+        return int(prod["visible_tienda"] if "visible_tienda" in prod.keys() and prod["visible_tienda"] is not None else 1) == 1
+    except Exception:
+        return True
+
+def render_card_producto_grupo_variantes(grupo, variantes, user, cliente_precio=None):
+    if not variantes:
+        return
+
+    # Ordenar por orden/medida/color para que la selección sea estable.
+    def sort_key(v):
+        try:
+            orden = int(v["orden_variante"] or 0)
+        except Exception:
+            orden = 0
+        return (orden, str(v["atributo_medida"] or ""), str(v["atributo_color"] or ""), str(v["descripcion"] or ""))
+
+    variantes = sorted(variantes, key=sort_key)
+    primero = variantes[0]
+    nombre_grupo = str(primero["nombre_visible_grupo"] if "nombre_visible_grupo" in primero.keys() and primero["nombre_visible_grupo"] else "").strip()
+    if not nombre_grupo:
+        nombre_grupo = str(grupo).strip() or str(primero["descripcion"] or "Producto agrupado")
+
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown(f"### {nombre_grupo}")
+    st.caption(f"Producto agrupado · {len(variantes)} variante(s) disponibles. Cada color/medida conserva su SKU real.")
+
+    medidas = []
+    for v in variantes:
+        med = str(v["atributo_medida"] if "atributo_medida" in v.keys() and v["atributo_medida"] else "Sin medida").strip() or "Sin medida"
+        if med not in medidas:
+            medidas.append(med)
+
+    c1, c2 = st.columns(2)
+    medida_sel = c1.selectbox("Medida", medidas, key=f"grupo_med_{grupo}")
+
+    variantes_medida = [
+        v for v in variantes
+        if (str(v["atributo_medida"] if "atributo_medida" in v.keys() and v["atributo_medida"] else "Sin medida").strip() or "Sin medida") == medida_sel
+    ]
+
+    colores = []
+    for v in variantes_medida:
+        col = str(v["atributo_color"] if "atributo_color" in v.keys() and v["atributo_color"] else "Sin color").strip() or "Sin color"
+        if col not in colores:
+            colores.append(col)
+
+    color_sel = c2.selectbox("Color", colores, key=f"grupo_col_{grupo}_{medida_sel}")
+
+    seleccion = None
+    for v in variantes_medida:
+        col = str(v["atributo_color"] if "atributo_color" in v.keys() and v["atributo_color"] else "Sin color").strip() or "Sin color"
+        if col == color_sel:
+            seleccion = v
+            break
+
+    if not seleccion:
+        st.warning("No hay una variante disponible para esa combinación.")
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+
+    data = dict(seleccion)
+    med_txt = str(data.get("atributo_medida") or "").strip()
+    col_txt = str(data.get("atributo_color") or "").strip()
+    sufijo = " · ".join([x for x in [med_txt, col_txt] if x])
+    data["descripcion"] = f"{nombre_grupo}" + (f" ({sufijo})" if sufijo else "")
+    st.info(f"Seleccionado: **{data['descripcion']}** · SKU real: **{data['sku']}**")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    render_card_producto(data, user, cliente_precio=cliente_precio)
+
+
 def tienda():
     st.markdown("## 🛍️ Tienda / Catálogo")
     st.caption("Vista en lista horizontal: imagen, información y acciones por producto.")
@@ -6130,35 +6281,54 @@ def tienda():
 
     sql = """SELECT p.*, c.nombre AS categoria
              FROM productos p LEFT JOIN categorias c ON p.categoria_id=c.id
-             WHERE p.activo=1"""
+             WHERE p.activo=1
+             AND (
+                COALESCE(p.visible_tienda,1)=1
+                OR (COALESCE(p.es_variante,0)=1 AND COALESCE(p.grupo_variantes,'')<>'')
+             )"""
     params = []
     if cat_ids[cat_sel]:
         sql += " AND p.categoria_id=?"
         params.append(cat_ids[cat_sel])
     if bus:
-        sql += " AND (p.descripcion LIKE ? OR p.sku LIKE ?)"
-        params.extend([f"%{bus}%", f"%{bus}%"])
-    sql += " ORDER BY c.orden, p.descripcion"
+        sql += " AND (p.descripcion LIKE ? OR p.sku LIKE ? OR COALESCE(p.grupo_variantes,'') LIKE ? OR COALESCE(p.nombre_visible_grupo,'') LIKE ? OR COALESCE(p.atributo_medida,'') LIKE ? OR COALESCE(p.atributo_color,'') LIKE ?)"
+        params.extend([f"%{bus}%", f"%{bus}%", f"%{bus}%", f"%{bus}%", f"%{bus}%", f"%{bus}%"])
+    sql += " ORDER BY c.orden, COALESCE(p.grupo_variantes,''), p.orden_variante, p.descripcion"
     rows = q(sql, params, fetch=True)
 
+    grupos = {}
+    standalone = []
+    for prod in rows:
+        if producto_es_variante_agrupada(prod):
+            g = str(prod["grupo_variantes"] or "").strip()
+            grupos.setdefault(g, []).append(prod)
+        else:
+            if producto_visible_tienda(prod):
+                standalone.append(prod)
+
+    total_visible = len(grupos) + len(standalone)
+
     rinfo1, rinfo2 = st.columns([3, 1])
-    rinfo1.caption(f"{len(rows)} productos encontrados")
+    rinfo1.caption(f"{total_visible} publicación(es) visibles · {len(rows)} SKU activo(s) cargado(s)")
     if rinfo2.button("🔄 Actualizar stock", use_container_width=True):
         with st.spinner("Sincronizando WooCommerce..."):
             ok, no, errors = sync_todos_productos()
         st.success(f"Sincronizados: {ok}. No sincronizados: {no}.")
         if errors:
             st.warning("Algunos errores:")
-            st.code("\\n".join(errors))
+            st.code("\n".join(errors))
         st.rerun()
 
-    if not rows:
+    if not rows or total_visible == 0:
         st.info("No hay productos para mostrar.")
         return
 
-    # Vista horizontal: una card por fila, sin cuadrícula.
-    for prod in rows:
-        render_card_producto(prod, user)
+    # Primero productos agrupados por variantes, luego productos normales.
+    for grupo, variantes in grupos.items():
+        render_card_producto_grupo_variantes(grupo, variantes, user, cliente_precio=cliente_precio)
+
+    for prod in standalone:
+        render_card_producto(prod, user, cliente_precio=cliente_precio)
 
 
 
