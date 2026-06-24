@@ -41,7 +41,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V78 Fix1 Pago Comprobante"
+APP_NAME = "Sistema de Insumos al Mayor V79 Pago Pendiente Contado"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -1694,6 +1694,10 @@ def registrar_pago_contado_pendiente(pedido_id, username, monto_usd, monto_bs, m
          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
       (0, int(pedido_id), username, now(), float(monto_usd or 0), float(monto_bs or 0), metodo, referencia, path,
        "Pendiente de validar", notas, "contado", 0, get_tasa_bcv(), get_tasa_proveedor(), float(monto_bs or 0), int(metodo_pago_id or 0)))
+    try:
+        q("UPDATE pedidos SET status='Pago por verificar' WHERE id=? AND tipo_pago='contado' AND status NOT IN ('Finalizado / Pagado','Cancelado','Anulado')", (int(pedido_id),))
+    except Exception:
+        pass
     return True
 
 
@@ -3730,6 +3734,161 @@ def alertas_inteligentes_admin():
 
     return alertas
 
+def pedido_contado_pendiente_de_pago(p):
+    try:
+        tipo = str(p["tipo_pago"] or "").lower()
+        status = str(p["status"] or "")
+        return tipo == "contado" and status in ["Pendiente de pago", "Pendiente", "Pago parcial POS"]
+    except Exception:
+        return False
+
+def pedido_contado_en_verificacion(p):
+    try:
+        return str(p["tipo_pago"] or "").lower() == "contado" and str(p["status"] or "") in ["Pago por verificar", "Pago por validar"]
+    except Exception:
+        return False
+
+def pedidos_contado_pendientes_usuario(username, limit=20):
+    return q("""SELECT * FROM pedidos
+                WHERE username=?
+                AND tipo_pago='contado'
+                AND COALESCE(status,'') IN ('Pendiente','Pendiente de pago','Pago parcial POS')
+                ORDER BY id DESC
+                LIMIT ?""", (username, int(limit)), fetch=True)
+
+def pedidos_contado_verificacion_usuario(username, limit=20):
+    return q("""SELECT * FROM pedidos
+                WHERE username=?
+                AND tipo_pago='contado'
+                AND COALESCE(status,'') IN ('Pago por verificar','Pago por validar')
+                ORDER BY id DESC
+                LIMIT ?""", (username, int(limit)), fetch=True)
+
+def formulario_cargar_pago_contado_pendiente(pedido, username, key_prefix="pago_contado_pendiente"):
+    pedido_id = int(pedido["id"])
+    total_usd = float(pedido["total_usd"] or 0)
+    tasa = get_tasa_proveedor()
+    total_bs = total_usd * tasa
+
+    # Si ya tiene un pago pendiente de validar, no dejamos duplicar desde aquí.
+    pendientes = q("""SELECT * FROM abonos
+                      WHERE pedido_id=? AND tipo_credito='contado'
+                      AND status='Pendiente de validar'
+                      ORDER BY id DESC""", (pedido_id,), fetch=True)
+    if pendientes:
+        st.info(f"Ya existe un pago en verificación para el pedido #{pedido_id}. Espera la validación del admin.")
+        return
+
+    with st.expander(f"💳 Cargar pago del pedido #{pedido_id} · {money_usd(total_usd)}", expanded=True):
+        st.caption(f"Tasa proveedor actual: {tasa:,.2f} · Total referencial en Bs: {money_bs(total_bs)}")
+
+        metodos = metodos_pago_activos()
+        mp_sel = None
+        metodo_nombre = ""
+        metodo_id = 0
+
+        if metodos:
+            opts = {f"{m['nombre']} · {m['tipo']}": m for m in metodos}
+            sel = st.selectbox("Método de pago", list(opts.keys()), key=f"{key_prefix}_mp_{pedido_id}")
+            mp_sel = opts[sel]
+            metodo_id = int(mp_sel["id"])
+            metodo_nombre = f"{mp_sel['nombre']} · {mp_sel['tipo']}"
+            render_metodo_pago_card(mp_sel)
+            render_instruccion_comprobante(mp_sel)
+        else:
+            st.warning("No hay métodos de pago activos configurados. Puedes escribir el método manualmente.")
+            metodo_nombre = st.text_input("Método de pago", value="Pago pendiente", key=f"{key_prefix}_metodo_manual_{pedido_id}")
+
+        c1, c2 = st.columns(2)
+        monto_usd = c1.number_input(
+            "Monto pagado USD",
+            min_value=0.0,
+            value=float(total_usd),
+            step=1.0,
+            key=f"{key_prefix}_usd_{pedido_id}",
+            help="Si el cliente pagó en divisas, coloca aquí el monto."
+        )
+        monto_bs = c2.number_input(
+            "Monto pagado Bs",
+            min_value=0.0,
+            value=0.0,
+            step=100.0,
+            key=f"{key_prefix}_bs_{pedido_id}",
+            help="Si el cliente pagó en bolívares, coloca aquí el monto."
+        )
+
+        equiv_usd = float(monto_usd or 0) + (float(monto_bs or 0) / tasa if tasa > 0 else 0)
+        faltante = total_usd - equiv_usd
+        if faltante > 0.01:
+            st.warning(f"Equivalente pagado: {money_usd(equiv_usd)} · Falta: {money_usd(faltante)}")
+        else:
+            st.success(f"Equivalente pagado: {money_usd(equiv_usd)} · Pago completo o con diferencia a favor.")
+
+        referencia = st.text_input("Referencia / número de operación", key=f"{key_prefix}_ref_{pedido_id}")
+        comp = st.file_uploader("Comprobante / capture", type=["png","jpg","jpeg","webp","pdf"], key=f"{key_prefix}_comp_{pedido_id}")
+        notas = st.text_area("Notas del pago", key=f"{key_prefix}_notas_{pedido_id}")
+
+        enviar = st.button("✅ Enviar pago para verificar", type="primary", use_container_width=True, key=f"{key_prefix}_enviar_{pedido_id}")
+        if enviar:
+            if float(monto_usd or 0) <= 0 and float(monto_bs or 0) <= 0:
+                st.error("Debes indicar el monto pagado en USD o en Bs.")
+                return
+            if not referencia.strip() and comp is None:
+                st.error("Coloca una referencia o carga un comprobante para respaldar el pago.")
+                return
+            ok = registrar_pago_contado_pendiente(
+                pedido_id,
+                username,
+                float(monto_usd or 0),
+                float(monto_bs or 0),
+                metodo_nombre,
+                referencia=referencia.strip(),
+                comprobante=comp,
+                notas=notas.strip(),
+                metodo_pago_id=metodo_id
+            )
+            if ok:
+                st.success("Pago enviado correctamente. Queda en proceso de verificación por el admin.")
+                st.rerun()
+            else:
+                st.error("No se pudo registrar el pago.")
+
+def seccion_pedidos_pendientes_pago(username, titulo="Pedidos pendientes por pagar", limit=10, expanded=False):
+    pendientes = pedidos_contado_pendientes_usuario(username, limit=limit)
+    verificacion = pedidos_contado_verificacion_usuario(username, limit=limit)
+
+    if not pendientes and not verificacion:
+        return
+
+    st.markdown("---")
+    st.subheader(titulo)
+
+    if verificacion:
+        st.info(f"Tienes {len(verificacion)} pago(s) contado en proceso de verificación.")
+        data_v = [{
+            "Pedido": int(p["id"]),
+            "Fecha": p["fecha"],
+            "Total": money_usd(p["total_usd"]),
+            "Estado": estado_visual(p["status"]),
+        } for p in verificacion]
+        st.dataframe(pd.DataFrame(data_v), use_container_width=True, hide_index=True)
+
+    if pendientes:
+        st.warning(f"Tienes {len(pendientes)} pedido(s) contado pendiente(s) de pago.")
+        data = [{
+            "Pedido": int(p["id"]),
+            "Fecha": p["fecha"],
+            "Total": money_usd(p["total_usd"]),
+            "Estado": estado_visual(p["status"]),
+        } for p in pendientes]
+        st.dataframe(pd.DataFrame(data), use_container_width=True, hide_index=True)
+        if expanded:
+            for p in pendientes[:3]:
+                formulario_cargar_pago_contado_pendiente(p, username, key_prefix="home_pago_pendiente")
+        else:
+            st.caption("Entra en Mis pagos o Mis pedidos para cargar el comprobante/referencia del pedido.")
+
+
 def mi_cuenta_home():
     st.title("👤 Mi cuenta")
     user = get_user(st.session_state.user["username"])
@@ -3763,6 +3922,8 @@ def mi_cuenta_home():
         st.info("Tienes pagos en proceso de verificación. El admin debe validarlos antes de actualizar saldos.")
     if not creditos.empty:
         st.warning("Tienes crédito en curso. Puedes notificar abonos desde Mis créditos.")
+
+    seccion_pedidos_pendientes_pago(username, titulo="Pedidos contado pendientes", limit=5, expanded=True)
 
     st.markdown("### Accesos rápidos")
     b1, b2, b3, b4 = st.columns(4)
@@ -3804,6 +3965,7 @@ def mi_cuenta_home():
 def mis_pagos():
     st.title("💵 Mis pagos")
     user = get_user(st.session_state.user["username"])
+    seccion_pedidos_pendientes_pago(user["username"], titulo="Pedidos pendientes por pagar", limit=20, expanded=True)
     mostrar_historial_pagos_cliente(user["username"], titulo="Historial de pagos y abonos")
 
 
@@ -3910,7 +4072,14 @@ def mis_pedidos():
     else:
         st.info("Este pedido todavía no tiene pagos o abonos notificados.")
 
-    estados = ["Pendiente", "Pendiente de pago", "Pago por validar", "Confirmado", "Preparando", "Listo para entregar",
+    if user["rol"] != "admin":
+        if pedido_contado_pendiente_de_pago(p):
+            st.markdown("---")
+            formulario_cargar_pago_contado_pendiente(p, user["username"], key_prefix="mis_pedidos_pago_pendiente")
+        elif pedido_contado_en_verificacion(p):
+            st.info("Este pedido ya tiene un pago en proceso de verificación. El admin debe validarlo.")
+
+    estados = ["Pendiente", "Pendiente de pago", "Pago por verificar", "Pago por validar", "Confirmado", "Preparando", "Listo para entregar",
                "Entregado", "Crédito en curso", "Finalizado / Pagado", "Cancelado", "Anulado"]
 
     c1, c2, c3 = st.columns(3)
@@ -4388,7 +4557,7 @@ def admin_tareas_counts():
         pagos = 0
     try:
         pedidos = q("""SELECT COUNT(*) AS n FROM pedidos
-                       WHERE COALESCE(status,'') IN ('Pendiente','Pendiente de pago','Pendiente de pago/entrega','Pago por validar','Confirmado','Preparando','Listo para entregar','Crédito en curso')""", fetch=True)[0]["n"]
+                       WHERE COALESCE(status,'') IN ('Pendiente','Pendiente de pago','Pendiente de pago/entrega','Pago por verificar','Pago por validar','Confirmado','Preparando','Listo para entregar','Crédito en curso')""", fetch=True)[0]["n"]
     except Exception:
         pedidos = 0
     try:
@@ -4482,6 +4651,16 @@ def admin_gestionar_abono(abono_id, key_prefix="abono_admin"):
         else:
             q("UPDATE abonos SET status='Rechazado', validado_por=?, fecha_validacion=? WHERE id=?",
               (st.session_state.user["username"], now(), int(abono_id)))
+            try:
+                if int(ab["credito_id"] or 0) <= 0 and int(ab["pedido_id"] or 0) > 0:
+                    otros = q("""SELECT COUNT(*) AS n FROM abonos
+                                  WHERE pedido_id=? AND id<>?
+                                  AND status IN ('Pendiente de validar','Validado')""",
+                               (int(ab["pedido_id"]), int(abono_id)), fetch=True)[0]["n"]
+                    if int(otros or 0) == 0:
+                        q("UPDATE pedidos SET status='Pendiente de pago' WHERE id=? AND status IN ('Pago por verificar','Pago por validar')", (int(ab["pedido_id"]),))
+            except Exception:
+                pass
             st.warning("Abono rechazado.")
             st.rerun()
 
@@ -4490,7 +4669,19 @@ def admin_gestionar_abono(abono_id, key_prefix="abono_admin"):
         if ab["status"] == "Validado":
             st.error("Por seguridad, no se elimina un abono validado desde aquí porque ya afectó el saldo del crédito.")
         else:
+            pedido_id_del = int(ab["pedido_id"] or 0)
+            credito_id_del = int(ab["credito_id"] or 0)
             q("DELETE FROM abonos WHERE id=?", (int(abono_id),))
+            try:
+                if credito_id_del <= 0 and pedido_id_del > 0:
+                    otros = q("""SELECT COUNT(*) AS n FROM abonos
+                                  WHERE pedido_id=?
+                                  AND status IN ('Pendiente de validar','Validado')""",
+                               (pedido_id_del,), fetch=True)[0]["n"]
+                    if int(otros or 0) == 0:
+                        q("UPDATE pedidos SET status='Pendiente de pago' WHERE id=? AND status IN ('Pago por verificar','Pago por validar')", (pedido_id_del,))
+            except Exception:
+                pass
             st.success("Abono eliminado.")
             st.rerun()
 
@@ -4525,7 +4716,7 @@ def admin_panel_pedido(pedido_id, key_prefix="pedido_admin"):
     dp2.download_button("📦 Descargar Packing List", data=packing_pdf, file_name=f"packing_list_{int(pedido_id):04d}.pdf",
                        mime="application/pdf", use_container_width=True, key=f"{key_prefix}_packing_{pedido_id}")
 
-    estados = ["Pendiente", "Pendiente de pago", "Pago por validar", "Confirmado", "Preparando", "Listo para entregar",
+    estados = ["Pendiente", "Pendiente de pago", "Pago por verificar", "Pago por validar", "Confirmado", "Preparando", "Listo para entregar",
                "Entregado", "Crédito en curso", "Finalizado / Pagado", "Cancelado", "Anulado"]
 
     st.markdown("#### Acciones del pedido")
@@ -4622,7 +4813,7 @@ def admin_centro_tareas():
     with tab2:
         pedidos = pd.read_sql_query("""SELECT id,fecha,username,cliente_nombre,tipo_pago,metodo_pago,total_usd,status,pos_procesado
                                        FROM pedidos
-                                       WHERE COALESCE(status,'') IN ('Pendiente','Pendiente de pago','Pendiente de pago/entrega','Pago por validar','Confirmado','Preparando','Listo para entregar','Crédito en curso')
+                                       WHERE COALESCE(status,'') IN ('Pendiente','Pendiente de pago','Pendiente de pago/entrega','Pago por verificar','Pago por validar','Confirmado','Preparando','Listo para entregar','Crédito en curso')
                                        ORDER BY id DESC LIMIT 80""", get_conn())
         if pedidos.empty:
             st.success("No hay pedidos por atender.")
