@@ -41,7 +41,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V79 Pago Pendiente Contado"
+APP_NAME = "Sistema de Insumos al Mayor V79 Fix3 Pago Sugerido en Cero"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -3780,12 +3780,17 @@ def formulario_cargar_pago_contado_pendiente(pedido, username, key_prefix="pago_
         return
 
     with st.expander(f"💳 Cargar pago del pedido #{pedido_id} · {money_usd(total_usd)}", expanded=True):
-        st.caption(f"Tasa proveedor actual: {tasa:,.2f} · Total referencial en Bs: {money_bs(total_bs)}")
+        st.info(
+            f"Tu pedido hace un total de **{money_usd(total_usd)} divisas**.  \n"
+            f"Tasa proveedor: **{tasa:,.2f}**.  \n"
+            f"Total a cancelar en bolívares: **{money_bs(total_bs)}**."
+        )
 
         metodos = metodos_pago_activos()
         mp_sel = None
         metodo_nombre = ""
         metodo_id = 0
+        tipo_metodo = ""
 
         if metodos:
             opts = {f"{m['nombre']} · {m['tipo']}": m for m in metodos}
@@ -3793,36 +3798,123 @@ def formulario_cargar_pago_contado_pendiente(pedido, username, key_prefix="pago_
             mp_sel = opts[sel]
             metodo_id = int(mp_sel["id"])
             metodo_nombre = f"{mp_sel['nombre']} · {mp_sel['tipo']}"
+            tipo_metodo = str(mp_sel["tipo"] or "")
             render_metodo_pago_card(mp_sel)
             render_instruccion_comprobante(mp_sel)
         else:
             st.warning("No hay métodos de pago activos configurados. Puedes escribir el método manualmente.")
             metodo_nombre = st.text_input("Método de pago", value="Pago pendiente", key=f"{key_prefix}_metodo_manual_{pedido_id}")
+            tipo_metodo = "Otro"
 
-        c1, c2 = st.columns(2)
-        monto_usd = c1.number_input(
-            "Monto pagado USD",
-            min_value=0.0,
-            value=float(total_usd),
-            step=1.0,
-            key=f"{key_prefix}_usd_{pedido_id}",
-            help="Si el cliente pagó en divisas, coloca aquí el monto."
-        )
-        monto_bs = c2.number_input(
-            "Monto pagado Bs",
-            min_value=0.0,
-            value=0.0,
-            step=100.0,
-            key=f"{key_prefix}_bs_{pedido_id}",
-            help="Si el cliente pagó en bolívares, coloca aquí el monto."
-        )
+        metodo_local_bs = tipo_metodo in ["Pago móvil", "Cuenta bancaria Venezuela"]
+
+        if metodo_local_bs:
+            st.success(f"Pago móvil / transferencia en bolívares · Monto sugerido: {money_bs(total_bs)}")
+            st.caption("Los campos arrancan en 0. Coloca el monto real pagado en Bs y, si aplica, una parte adicional en divisas.")
+
+            c1, c2 = st.columns(2)
+            monto_bs = c1.number_input(
+                "Pago principal en Bs",
+                min_value=0.0,
+                value=0.0,
+                step=100.0,
+                key=f"{key_prefix}_bs_principal_{pedido_id}",
+                help=f"Monto sugerido a pagar: {money_bs(total_bs)}"
+            )
+            monto_usd = c2.number_input(
+                "Parte pagada en divisas USD (opcional)",
+                min_value=0.0,
+                value=0.0,
+                step=1.0,
+                key=f"{key_prefix}_usd_extra_{pedido_id}",
+                help="Solo úsalo si el cliente canceló una parte en divisas aparte del pago móvil/transferencia."
+            )
+
+        else:
+            forma_pago = st.radio(
+                "¿Cómo vas a pagar este pedido?",
+                ["Divisas / USD", "Bolívares a tasa proveedor", "Pago mixto"],
+                horizontal=True,
+                key=f"{key_prefix}_forma_{pedido_id}",
+                help="Elige la forma de pago y coloca el monto real pagado. Los campos arrancan en 0."
+            )
+
+            if forma_pago == "Divisas / USD":
+                st.success(f"Monto sugerido a pagar en divisas: {money_usd(total_usd)}")
+                c1, c2 = st.columns(2)
+                monto_usd = c1.number_input(
+                    "Monto pagado USD",
+                    min_value=0.0,
+                    value=0.0,
+                    step=1.0,
+                    key=f"{key_prefix}_usd_usd_{pedido_id}",
+                    help=f"Monto sugerido: {money_usd(total_usd)}"
+                )
+                monto_bs = c2.number_input(
+                    "Monto pagado Bs",
+                    min_value=0.0,
+                    value=0.0,
+                    step=100.0,
+                    key=f"{key_prefix}_bs_usd_{pedido_id}",
+                    disabled=True,
+                    help="Para pago en divisas, este campo queda en 0 para evitar doble conteo."
+                )
+            elif forma_pago == "Bolívares a tasa proveedor":
+                st.success(f"Monto sugerido a pagar en bolívares: {money_bs(total_bs)}")
+                c1, c2 = st.columns(2)
+                monto_usd = c1.number_input(
+                    "Monto pagado USD",
+                    min_value=0.0,
+                    value=0.0,
+                    step=1.0,
+                    key=f"{key_prefix}_usd_bs_{pedido_id}",
+                    disabled=True,
+                    help="Para pago en bolívares, este campo queda en 0 para evitar doble conteo."
+                )
+                monto_bs = c2.number_input(
+                    "Monto pagado Bs",
+                    min_value=0.0,
+                    value=0.0,
+                    step=100.0,
+                    key=f"{key_prefix}_bs_bs_{pedido_id}",
+                    help=f"Monto sugerido: {money_bs(total_bs)}"
+                )
+            else:
+                st.warning("Pago mixto: usa esta opción solo si realmente pagaste una parte en USD y otra parte en Bs.")
+                c1, c2 = st.columns(2)
+                monto_usd = c1.number_input(
+                    "Monto pagado USD",
+                    min_value=0.0,
+                    value=0.0,
+                    step=1.0,
+                    key=f"{key_prefix}_usd_mix_{pedido_id}",
+                    help="Parte pagada en divisas."
+                )
+                monto_bs = c2.number_input(
+                    "Monto pagado Bs",
+                    min_value=0.0,
+                    value=0.0,
+                    step=100.0,
+                    key=f"{key_prefix}_bs_mix_{pedido_id}",
+                    help="Parte pagada en bolívares."
+                )
 
         equiv_usd = float(monto_usd or 0) + (float(monto_bs or 0) / tasa if tasa > 0 else 0)
         faltante = total_usd - equiv_usd
+        resumen = f"Equivalente total pagado: {money_usd(equiv_usd)}"
+        if float(monto_bs or 0) > 0:
+            resumen += f" · Pago en Bs: {money_bs(monto_bs)}"
+        if float(monto_usd or 0) > 0:
+            resumen += f" · Parte divisas: {money_usd(monto_usd)}"
+
         if faltante > 0.01:
-            st.warning(f"Equivalente pagado: {money_usd(equiv_usd)} · Falta: {money_usd(faltante)}")
+            st.warning(f"{resumen} · Falta: {money_usd(faltante)}")
+        elif abs(faltante) <= 0.01 and equiv_usd > 0:
+            st.success(f"{resumen} · Pago completo.")
+        elif equiv_usd <= 0:
+            st.warning(f"{resumen} · Falta: {money_usd(total_usd)}")
         else:
-            st.success(f"Equivalente pagado: {money_usd(equiv_usd)} · Pago completo o con diferencia a favor.")
+            st.info(f"{resumen} · Diferencia a favor: {money_usd(abs(faltante))}")
 
         referencia = st.text_input("Referencia / número de operación", key=f"{key_prefix}_ref_{pedido_id}")
         comp = st.file_uploader("Comprobante / capture", type=["png","jpg","jpeg","webp","pdf"], key=f"{key_prefix}_comp_{pedido_id}")
@@ -3852,6 +3944,7 @@ def formulario_cargar_pago_contado_pendiente(pedido, username, key_prefix="pago_
                 st.rerun()
             else:
                 st.error("No se pudo registrar el pago.")
+
 
 def seccion_pedidos_pendientes_pago(username, titulo="Pedidos pendientes por pagar", limit=10, expanded=False):
     pendientes = pedidos_contado_pendientes_usuario(username, limit=limit)
