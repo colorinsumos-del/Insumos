@@ -41,7 +41,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V79 Fix3 Pago Sugerido en Cero"
+APP_NAME = "Sistema de Insumos al Mayor V79 Fix3 Pago Sugerido en Cero Fix4 Crédito Residual"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -4490,6 +4490,16 @@ def admin_metodos_pago():
 
 
 
+
+def monto_input_seguro(valor, minimo=0.01):
+    try:
+        valor = float(valor or 0)
+    except Exception:
+        valor = 0.0
+    if valor < minimo:
+        return None
+    return round(valor, 2)
+
 def mis_creditos():
     st.title("💳 Mis créditos")
     user = get_user(st.session_state.user["username"])
@@ -4554,32 +4564,45 @@ def mis_creditos():
 
         if tipo == "bcv":
             saldo_bcv = float(cr["saldo_bcv"] or cr["saldo_usd"] or 0)
-            monto_bcv = st.number_input(
-                "Monto a pagar en $ BCV",
-                min_value=0.01,
-                max_value=saldo_bcv,
-                value=min(10.0, saldo_bcv),
-                step=0.01,
-                key=f"monto_abono_bcv_{cr['id']}"
-            )
-            tasa_actual = get_tasa_bcv()
-            monto_bs = float(monto_bcv or 0) * tasa_actual
-            st.info(
-                f"Tasa BCV del momento: {tasa_actual:,.2f}\n\n"
-                f"Debes transferir: {money_bs(monto_bs)}\n\n"
-                "Esta tasa quedará guardada en la notificación del pago."
-            )
-            ref = st.text_input("Referencia", key=f"ref_abono_bcv_{cr['id']}")
-            comp = st.file_uploader("Comprobante", type=["jpg","jpeg","png","webp","pdf"], key=f"comp_abono_bcv_{cr['id']}")
-            notas = st.text_area("Notas", key=f"notas_abono_bcv_{cr['id']}")
-            submit = st.button("Enviar pago BCV para validar", type="primary", use_container_width=True, key=f"btn_abono_bcv_{cr['id']}")
+            monto_bcv_default = monto_input_seguro(saldo_bcv, 0.01)
+
+            if monto_bcv_default is None:
+                st.warning(
+                    f"Este crédito tiene un saldo residual muy bajo en $ BCV: {saldo_bcv:.6f}. "
+                    "Como es menor a 0,01, no se puede cargar desde este campo."
+                )
+                monto_bcv = 0.0
+                ref = st.text_input("Referencia", key=f"ref_abono_bcv_{cr['id']}", disabled=True)
+                comp = st.file_uploader("Comprobante", type=["jpg","jpeg","png","webp","pdf"], key=f"comp_abono_bcv_{cr['id']}", disabled=True)
+                notas = st.text_area("Notas", key=f"notas_abono_bcv_{cr['id']}", disabled=True)
+                submit = False
+            else:
+                monto_bcv = st.number_input(
+                    "Monto a pagar en $ BCV",
+                    min_value=0.01,
+                    max_value=max(0.01, round(float(saldo_bcv or 0), 2)),
+                    value=min(10.0, monto_bcv_default),
+                    step=0.01,
+                    key=f"monto_abono_bcv_{cr['id']}"
+                )
+                tasa_actual = get_tasa_bcv()
+                monto_bs = float(monto_bcv or 0) * tasa_actual
+                st.info(
+                    f"Tasa BCV del momento: {tasa_actual:,.2f}\n\n"
+                    f"Debes transferir: {money_bs(monto_bs)}\n\n"
+                    "Esta tasa quedará guardada en la notificación del pago."
+                )
+                ref = st.text_input("Referencia", key=f"ref_abono_bcv_{cr['id']}")
+                comp = st.file_uploader("Comprobante", type=["jpg","jpeg","png","webp","pdf"], key=f"comp_abono_bcv_{cr['id']}")
+                notas = st.text_area("Notas", key=f"notas_abono_bcv_{cr['id']}")
+                submit = st.button("Enviar pago BCV para validar", type="primary", use_container_width=True, key=f"btn_abono_bcv_{cr['id']}")
         else:
             saldo_usd = float(cr["saldo_usd"] or 0)
             monto = st.number_input(
                 "Monto USD que deseas abonar",
                 min_value=0.01,
-                max_value=saldo_usd,
-                value=min(10.0, saldo_usd),
+                max_value=max(0.01, round(float(saldo_usd or 0), 2)),
+                value=min(10.0, max(0.01, round(float(saldo_usd or 0), 2))),
                 step=0.01,
                 key=f"monto_abono_usd_{cr['id']}"
             )
