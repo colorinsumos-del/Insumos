@@ -41,7 +41,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V79 Fix3 Pago Sugerido en Cero Fix4 Crédito Residual"
+APP_NAME = "Sistema de Insumos al Mayor V79 Fix3 Pago Sugerido en Cero Fix4 Crédito Residual Fix5 Cierre Crédito Total"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -1831,6 +1831,11 @@ def aplicar_abono_validado(abono_id, admin_username):
           (nuevo_saldo_bcv, nuevo_saldo_bcv, nuevo_status, cr["id"]))
         if nuevo_status == "Pagado":
             q("UPDATE pedidos SET status='Finalizado / Pagado' WHERE id=?", (cr["pedido_id"],))
+            q("""UPDATE abonos
+                 SET status='Anulado',
+                     notas=COALESCE(notas,'') || ?
+                 WHERE credito_id=? AND status='Pendiente de validar' AND id<>?""",
+              (f"\n[{now()}] Anulado automáticamente porque el crédito ya quedó Pagado.", cr["id"], abono_id))
         else:
             q("UPDATE pedidos SET status='Crédito en curso' WHERE id=?", (cr["pedido_id"],))
         return True, f"Abono BCV validado. Saldo actual: {money_usd(nuevo_saldo_bcv)} BCV"
@@ -1842,6 +1847,11 @@ def aplicar_abono_validado(abono_id, admin_username):
     q("UPDATE creditos SET saldo_usd=?, status=? WHERE id=?", (nuevo_saldo, nuevo_status, cr["id"]))
     if nuevo_status == "Pagado":
         q("UPDATE pedidos SET status='Finalizado / Pagado' WHERE id=?", (cr["pedido_id"],))
+        q("""UPDATE abonos
+             SET status='Anulado',
+                 notas=COALESCE(notas,'') || ?
+             WHERE credito_id=? AND status='Pendiente de validar' AND id<>?""",
+          (f"\n[{now()}] Anulado automáticamente porque el crédito ya quedó Pagado.", cr["id"], abono_id))
     else:
         q("UPDATE pedidos SET status='Crédito en curso' WHERE id=?", (cr["pedido_id"],))
     return True, f"Abono validado. Saldo actual: {money_usd(nuevo_saldo)}"
@@ -2312,35 +2322,99 @@ def anular_credito_de_pedido(pedido_id, motivo="Pedido cancelado"):
     return True, "Pedido cancelado y crédito asociado anulado."
 
 def marcar_credito_pagado(credito_id, actor="admin"):
+    """
+    Cierra completamente un crédito cuando el pedido se marca como Finalizado / Pagado.
+
+    Reglas:
+    - Si hay abonos pendientes de validar para ese crédito, se validan automáticamente.
+    - Si todavía queda saldo después de esos abonos, se registra un abono de cierre administrativo.
+    - Si el saldo restante es residual menor a 0,01, se cierra por redondeo sin dejarlo pendiente.
+    - El crédito queda en Pagado y el pedido en Finalizado / Pagado.
+    """
     rows = q("SELECT * FROM creditos WHERE id=?", (int(credito_id),), fetch=True)
     if not rows:
         return False, "Crédito no encontrado."
+
     cr = rows[0]
+    credito_id = int(credito_id)
     tipo = str(cr["tipo_credito"] if "tipo_credito" in cr.keys() and cr["tipo_credito"] else "usd").lower()
+    pendientes = q("SELECT * FROM abonos WHERE credito_id=? AND status='Pendiente de validar' ORDER BY id", (credito_id,), fetch=True)
+
     if tipo == "bcv":
         saldo = float(cr["saldo_bcv"] or cr["saldo_usd"] or 0)
-        if saldo > 0.009:
+        total_pendiente = 0.0
+        for ab in pendientes:
+            total_pendiente += float(ab["monto_bcv"] or ab["monto_usd"] or 0)
+
+        # Los abonos que ya estaban en espera se validan, así desaparecen de Pendientes por validar.
+        q("""UPDATE abonos
+             SET status='Validado',
+                 validado_por=?,
+                 fecha_validacion=?,
+                 notas=COALESCE(notas,'') || ?
+             WHERE credito_id=? AND status='Pendiente de validar'""",
+          (actor, now(), f"\n[{now()}] Validado automáticamente al cerrar el crédito como pagado.", credito_id))
+
+        faltante = max(0.0, saldo - total_pendiente)
+        if faltante >= 0.01:
             tasa_bcv = get_tasa_bcv()
             q("""INSERT INTO abonos
                  (credito_id,pedido_id,username,fecha,monto_usd,monto_bs,metodo,referencia,comprobante_path,status,validado_por,fecha_validacion,notas,
                   tipo_credito,monto_bcv,tasa_bcv,monto_bs_esperado)
                  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-              (cr["id"], cr["pedido_id"], cr["username"], now(), saldo, saldo*tasa_bcv, "Cierre administrativo", "CREDITO-BCV-PAGADO", None, "Validado", actor, now(), "Cierre manual de crédito BCV como pagado.",
-               "bcv", saldo, tasa_bcv, saldo*tasa_bcv))
-        q("UPDATE creditos SET saldo_bcv=0, saldo_usd=0, status='Pagado' WHERE id=?", (int(credito_id),))
+              (cr["id"], cr["pedido_id"], cr["username"], now(), faltante, faltante*tasa_bcv, "Cierre administrativo", "CREDITO-BCV-PAGADO", None, "Validado", actor, now(), "Cierre manual de saldo restante BCV.",
+               "bcv", faltante, tasa_bcv, faltante*tasa_bcv))
+        elif faltante > 0:
+            # Saldo de menos de 0,01: cierre por redondeo.
+            tasa_bcv = get_tasa_bcv()
+            q("""INSERT INTO abonos
+                 (credito_id,pedido_id,username,fecha,monto_usd,monto_bs,metodo,referencia,comprobante_path,status,validado_por,fecha_validacion,notas,
+                  tipo_credito,monto_bcv,tasa_bcv,monto_bs_esperado)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+              (cr["id"], cr["pedido_id"], cr["username"], now(), faltante, faltante*tasa_bcv, "Ajuste por redondeo", "REDONDEO-BCV", None, "Validado", actor, now(), "Cierre de saldo residual menor a 0,01.",
+               "bcv", faltante, tasa_bcv, faltante*tasa_bcv))
+
+        q("UPDATE creditos SET saldo_bcv=0, saldo_usd=0, status='Pagado' WHERE id=?", (credito_id,))
     else:
         saldo = float(cr["saldo_usd"] or 0)
-        if saldo > 0.009:
+        total_pendiente = 0.0
+        for ab in pendientes:
+            total_pendiente += float(ab["monto_usd"] or 0)
+
+        q("""UPDATE abonos
+             SET status='Validado',
+                 validado_por=?,
+                 fecha_validacion=?,
+                 notas=COALESCE(notas,'') || ?
+             WHERE credito_id=? AND status='Pendiente de validar'""",
+          (actor, now(), f"\n[{now()}] Validado automáticamente al cerrar el crédito como pagado.", credito_id))
+
+        faltante = max(0.0, saldo - total_pendiente)
+        if faltante >= 0.01:
             tasa = get_tasa_proveedor()
             q("""INSERT INTO abonos
                  (credito_id,pedido_id,username,fecha,monto_usd,monto_bs,metodo,referencia,comprobante_path,status,validado_por,fecha_validacion,notas,
                   tipo_credito,monto_bcv,tasa_bcv,monto_bs_esperado)
                  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-              (cr["id"], cr["pedido_id"], cr["username"], now(), saldo, saldo*tasa, "Cierre administrativo", "CREDITO-PAGADO", None, "Validado", actor, now(), "Cierre manual de crédito como pagado.",
-               "usd", 0, get_tasa_bcv(), saldo*tasa))
-        q("UPDATE creditos SET saldo_usd=0, status='Pagado' WHERE id=?", (int(credito_id),))
+              (cr["id"], cr["pedido_id"], cr["username"], now(), faltante, faltante*tasa, "Cierre administrativo", "CREDITO-PAGADO", None, "Validado", actor, now(), "Cierre manual de saldo restante.",
+               "usd", 0, get_tasa_bcv(), faltante*tasa))
+        elif faltante > 0:
+            tasa = get_tasa_proveedor()
+            q("""INSERT INTO abonos
+                 (credito_id,pedido_id,username,fecha,monto_usd,monto_bs,metodo,referencia,comprobante_path,status,validado_por,fecha_validacion,notas,
+                  tipo_credito,monto_bcv,tasa_bcv,monto_bs_esperado)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+              (cr["id"], cr["pedido_id"], cr["username"], now(), faltante, faltante*tasa, "Ajuste por redondeo", "REDONDEO-USD", None, "Validado", actor, now(), "Cierre de saldo residual menor a 0,01.",
+               "usd", 0, get_tasa_bcv(), faltante*tasa))
+
+        q("UPDATE creditos SET saldo_usd=0, status='Pagado' WHERE id=?", (credito_id,))
+
     q("UPDATE pedidos SET status='Finalizado / Pagado' WHERE id=?", (int(cr["pedido_id"]),))
-    return True, "Crédito marcado como Pagado y pedido como Finalizado / Pagado."
+
+    n_pend = len(pendientes)
+    if n_pend:
+        return True, f"Crédito cerrado como Pagado. Se validaron {n_pend} abono(s) pendiente(s), saldo en 0 y pedido Finalizado / Pagado."
+    return True, "Crédito marcado como Pagado, saldo en 0 y pedido Finalizado / Pagado."
 
 def validar_stock_carrito_woocommerce(carrito):
     """
