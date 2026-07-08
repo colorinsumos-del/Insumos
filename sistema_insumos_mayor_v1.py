@@ -41,7 +41,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V79 Fix3 Pago Sugerido en Cero Fix4 Crédito Residual Fix5 Cierre Crédito Total Fix6 Laminados por Metro"
+APP_NAME = "Sistema de Insumos al Mayor V79 Fix3 Pago Sugerido en Cero Fix4 Crédito Residual Fix5 Cierre Crédito Total Fix6 Laminados por Metro Fix7 Laminado UI Clara Fix8 Laminado Form Editable"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -3170,47 +3170,114 @@ def admin_productos():
             unidad_default = "metro" if tipo_venta == "metro" else (prod["unidad_base"] if prod and prod["unidad_base"] in unidad_opts else "unidad")
             unidad_base = st.selectbox("Unidad base", unidad_opts, index=unidad_opts.index(unidad_default))
 
+            es_producto_metro_form = tipo_venta == "metro"
+            if es_producto_metro_form:
+                st.info(
+                    "Producto configurado para venta por metros. "
+                    "Los campos normales de Unidad / presentación / bulto quedan bloqueados. "
+                    "Carga los datos reales en la sección 'Venta por metro / laminados'."
+                )
+
             c1, c2, c3 = st.columns(3)
-            precio_unidad = c1.number_input("Precio unidad USD", min_value=0.0, value=float(prod["precio_unidad"] if prod else 0), step=0.01)
-            precio_docena = c2.number_input("Precio presentación intermedia c/u USD", min_value=0.0, value=float(prod["precio_docena"] if prod else 0), step=0.01, help="Usa este campo para Docena, Pack x10, Caja, Paquete, etc. Es precio unitario dentro de esa presentación.")
-            precio_bulto = c3.number_input("Precio bulto c/u USD", min_value=0.0, value=float(prod["precio_bulto"] if prod else 0), step=0.01)
+            precio_unidad = c1.number_input(
+                "Precio unidad USD",
+                min_value=0.0,
+                value=float(prod["precio_unidad"] if prod else 0),
+                step=0.01,
+                disabled=es_producto_metro_form,
+                help="No aplica para productos por metro. Usa 'Metro detall USD'."
+            )
+            precio_docena = c2.number_input(
+                "Precio presentación intermedia c/u USD",
+                min_value=0.0,
+                value=float(prod["precio_docena"] if prod else 0),
+                step=0.01,
+                disabled=es_producto_metro_form,
+                help="No aplica para productos por metro. Usa 'Metro mayor USD'."
+            )
+            precio_bulto = c3.number_input(
+                "Precio bulto c/u USD",
+                min_value=0.0,
+                value=float(prod["precio_bulto"] if prod else 0),
+                step=0.01,
+                disabled=es_producto_metro_form,
+                help="No aplica para productos por metro. Usa 'Rollo contiene metros' y costos de rollo."
+            )
 
             st.markdown("#### Precio especial opcional")
             pe0, pe1, pe2, pe3 = st.columns(4)
-            maneja_precio_especial = pe0.checkbox("Maneja precio especial", value=bool(prod["maneja_precio_especial"]) if prod and "maneja_precio_especial" in prod.keys() else False)
-            precio_especial_unidad = pe1.number_input("Especial unidad USD", min_value=0.0, value=float(prod["precio_especial_unidad"] if prod and "precio_especial_unidad" in prod.keys() else 0), step=0.01, disabled=not maneja_precio_especial)
-            precio_especial_docena = pe2.number_input("Especial presentación c/u USD", min_value=0.0, value=float(prod["precio_especial_docena"] if prod and "precio_especial_docena" in prod.keys() else 0), step=0.01, disabled=not maneja_precio_especial, help="Precio por unidad dentro de la presentación intermedia.")
-            precio_especial_bulto = pe3.number_input("Especial bulto c/u USD", min_value=0.0, value=float(prod["precio_especial_bulto"] if prod and "precio_especial_bulto" in prod.keys() else 0), step=0.01, disabled=not maneja_precio_especial, help="Precio por unidad dentro del bulto. Ej: si el bulto trae 50 y quieres total $11, coloca 0.22.")
+            maneja_precio_especial = pe0.checkbox(
+                "Maneja precio especial",
+                value=False if es_producto_metro_form else (bool(prod["maneja_precio_especial"]) if prod and "maneja_precio_especial" in prod.keys() else False),
+                disabled=es_producto_metro_form
+            )
+            precio_especial_unidad = pe1.number_input("Especial unidad USD", min_value=0.0, value=float(prod["precio_especial_unidad"] if prod and "precio_especial_unidad" in prod.keys() else 0), step=0.01, disabled=(not maneja_precio_especial or es_producto_metro_form))
+            precio_especial_docena = pe2.number_input("Especial presentación c/u USD", min_value=0.0, value=float(prod["precio_especial_docena"] if prod and "precio_especial_docena" in prod.keys() else 0), step=0.01, disabled=(not maneja_precio_especial or es_producto_metro_form), help="Precio por unidad dentro de la presentación intermedia.")
+            precio_especial_bulto = pe3.number_input("Especial bulto c/u USD", min_value=0.0, value=float(prod["precio_especial_bulto"] if prod and "precio_especial_bulto" in prod.keys() else 0), step=0.01, disabled=(not maneja_precio_especial or es_producto_metro_form), help="Precio por unidad dentro del bulto. Ej: si el bulto trae 50 y quieres total $11, coloca 0.22.")
+            if es_producto_metro_form:
+                maneja_precio_especial = False
 
             c4, c5, c6, c7 = st.columns(4)
-            maneja_docena = c4.checkbox("Maneja presentación intermedia", value=bool(prod["maneja_docena"]) if prod else True)
+            maneja_docena = c4.checkbox(
+                "Maneja presentación intermedia",
+                value=False if es_producto_metro_form else (bool(prod["maneja_docena"]) if prod else True),
+                disabled=es_producto_metro_form
+            )
             nombre_intermedio_actual = producto_intermedia_nombre(prod) if prod else "Docena"
             opciones_intermedias = ["Docena", "Pack", "Caja", "Paquete"]
             if nombre_intermedio_actual not in opciones_intermedias:
                 opciones_intermedias.append(nombre_intermedio_actual)
-            presentacion_intermedia_nombre = c5.selectbox("Nombre", opciones_intermedias, index=opciones_intermedias.index(nombre_intermedio_actual))
-            presentacion_intermedia_cantidad = c6.number_input("Contiene unidades", min_value=1, max_value=9999, value=producto_intermedia_cantidad(prod) if prod else 12, step=1)
-            maneja_bulto = c7.checkbox("Maneja bulto", value=bool(prod["maneja_bulto"]) if prod else True)
+            presentacion_intermedia_nombre = c5.selectbox(
+                "Nombre",
+                opciones_intermedias,
+                index=opciones_intermedias.index(nombre_intermedio_actual),
+                disabled=es_producto_metro_form
+            )
+            presentacion_intermedia_cantidad = c6.number_input(
+                "Contiene unidades",
+                min_value=1,
+                max_value=9999,
+                value=producto_intermedia_cantidad(prod) if prod else 12,
+                step=1,
+                disabled=es_producto_metro_form
+            )
+            maneja_bulto = c7.checkbox(
+                "Maneja bulto",
+                value=False if es_producto_metro_form else (bool(prod["maneja_bulto"]) if prod else True),
+                disabled=es_producto_metro_form
+            )
+
+            if es_producto_metro_form:
+                maneja_docena = False
+                maneja_bulto = False
 
             c8, c9 = st.columns(2)
-            bulto_contiene = c8.number_input("Bulto contiene unidades base", min_value=1, max_value=9999, value=int(prod["bulto_contiene"] if prod and prod["bulto_contiene"] else 1), step=1)
+            bulto_contiene = c8.number_input(
+                "Bulto contiene unidades base",
+                min_value=1,
+                max_value=9999,
+                value=int(prod["bulto_contiene"] if prod and prod["bulto_contiene"] else 1),
+                step=1,
+                disabled=es_producto_metro_form,
+                help="No aplica para productos por metro. Usa 'Rollo contiene metros'."
+            )
 
             st.markdown("#### Venta por metro / laminados")
-            st.caption("Estos campos se usan cuando el Tipo de venta es Por metro. Ejemplo: laminado al frío 30 cm x 100 m, mayor desde 10 m.")
+            st.caption("Aquí cargas los datos reales del laminado. Aunque el selector está dentro de un formulario, esta sección queda editable siempre para evitar el cursor de prohibido. Solo se usa al guardar si el Tipo de venta es Por metro / laminado.")
             lm1, lm2, lm3, lm4 = st.columns(4)
             precio_metro_detal_default = float(prod["precio_metro_detal"] if prod and "precio_metro_detal" in prod.keys() and prod["precio_metro_detal"] else (prod["precio_unidad"] if prod else 0))
             precio_metro_mayor_default = float(prod["precio_metro_mayor"] if prod and "precio_metro_mayor" in prod.keys() and prod["precio_metro_mayor"] else (prod["precio_docena"] if prod else 0))
-            precio_metro_detal = lm1.number_input("Metro detal USD", min_value=0.0, value=precio_metro_detal_default, step=0.01, disabled=tipo_venta != "metro")
-            precio_metro_mayor = lm2.number_input("Metro mayor USD", min_value=0.0, value=precio_metro_mayor_default, step=0.01, disabled=tipo_venta != "metro")
-            mayor_desde_metros = lm3.number_input("Mayor desde metros", min_value=1, max_value=9999, value=int(prod["mayor_desde_metros"] if prod and "mayor_desde_metros" in prod.keys() and prod["mayor_desde_metros"] else 10), step=1, disabled=tipo_venta != "metro")
-            metros_por_rollo = lm4.number_input("Rollo contiene metros", min_value=1, max_value=9999, value=int(prod["metros_por_rollo"] if prod and "metros_por_rollo" in prod.keys() and prod["metros_por_rollo"] else 100), step=1, disabled=tipo_venta != "metro")
+            precio_metro_detal = lm1.number_input("Metro detal USD", min_value=0.0, value=precio_metro_detal_default, step=0.01, help="Editable siempre. Solo se usa al guardar si el Tipo de venta es Por metro / laminado.")
+            precio_metro_mayor = lm2.number_input("Metro mayor USD", min_value=0.0, value=precio_metro_mayor_default, step=0.01, help="Editable siempre. Solo se usa al guardar si el Tipo de venta es Por metro / laminado.")
+            mayor_desde_metros = lm3.number_input("Mayor desde metros", min_value=1, max_value=9999, value=int(prod["mayor_desde_metros"] if prod and "mayor_desde_metros" in prod.keys() and prod["mayor_desde_metros"] else 10), step=1, help="Editable siempre. Solo se usa al guardar si el Tipo de venta es Por metro / laminado.")
+            metros_por_rollo = lm4.number_input("Rollo contiene metros", min_value=1, max_value=9999, value=int(prod["metros_por_rollo"] if prod and "metros_por_rollo" in prod.keys() and prod["metros_por_rollo"] else 100), step=1, help="Editable siempre. Solo se usa al guardar si el Tipo de venta es Por metro / laminado.")
 
             lm5, lm6 = st.columns(2)
-            costo_rollo = lm5.number_input("Costo del rollo USD", min_value=0.0, value=float(prod["costo_rollo"] if prod and "costo_rollo" in prod.keys() and prod["costo_rollo"] else 0), step=0.01, disabled=tipo_venta != "metro")
-            envio_costo_rollo = lm6.number_input("Envío del rollo USD", min_value=0.0, value=float(prod["envio_costo_rollo"] if prod and "envio_costo_rollo" in prod.keys() and prod["envio_costo_rollo"] else 0), step=0.01, disabled=tipo_venta != "metro")
+            costo_rollo = lm5.number_input("Costo del rollo USD", min_value=0.0, value=float(prod["costo_rollo"] if prod and "costo_rollo" in prod.keys() and prod["costo_rollo"] else 0), step=0.01, help="Editable siempre. Solo se usa al guardar si el Tipo de venta es Por metro / laminado.")
+            envio_costo_rollo = lm6.number_input("Envío del rollo USD", min_value=0.0, value=float(prod["envio_costo_rollo"] if prod and "envio_costo_rollo" in prod.keys() and prod["envio_costo_rollo"] else 0), step=0.01, help="Editable siempre. Solo se usa al guardar si el Tipo de venta es Por metro / laminado.")
             if tipo_venta == "metro":
                 costo_metro_preview = ((float(costo_rollo or 0) + float(envio_costo_rollo or 0)) / max(1, int(metros_por_rollo or 1)))
-                st.info(f"Costo real estimado por metro: {money_usd(costo_metro_preview)} · Mayor automático desde {int(mayor_desde_metros)} m.")
+                st.info(f"Costo real estimado por metro: {money_usd(costo_metro_preview)} · Mayor automático desde {int(mayor_desde_metros)} m. El stock de WooCommerce se interpretará como metros disponibles.")
 
             c10, c11 = st.columns(2)
             peso = c10.number_input(
