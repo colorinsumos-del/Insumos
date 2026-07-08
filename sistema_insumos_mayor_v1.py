@@ -41,7 +41,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V79 Fix3 Pago Sugerido en Cero Fix4 Crédito Residual Fix5 Cierre Crédito Total Fix6 Laminados por Metro Fix7 Laminado UI Clara Fix8 Laminado Form Editable Fix9 Laminado Solo Metro Fix10 Nuevo Producto Limpio"
+APP_NAME = "Sistema de Insumos al Mayor V79 Fix3 Pago Sugerido en Cero Fix4 Crédito Residual Fix5 Cierre Crédito Total Fix6 Laminados por Metro Fix7 Laminado UI Clara Fix8 Laminado Form Editable Fix9 Laminado Solo Metro Fix10 Nuevo Producto Limpio Fix11 Form Dinámico"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -3172,33 +3172,41 @@ def admin_productos():
                     current_cat_name = name
                     break
 
+        # Estos selectores van FUERA del formulario para que Streamlit pueda refrescar
+        # la pantalla al cambiar entre unidad, rollo o metro.
+        tipo_actual = producto_tipo_venta(prod) if prod else "normal"
+        opciones_tipo_venta = ["normal", "metro"]
+        tipo_venta_pre = st.selectbox(
+            "Tipo de venta",
+            opciones_tipo_venta,
+            index=opciones_tipo_venta.index(tipo_actual) if tipo_actual in opciones_tipo_venta else 0,
+            format_func=lambda x: "Unidad / presentación / bulto" if x == "normal" else "Por metro / laminado",
+            help="Usa 'Por metro' para laminados, viniles por metro, rollos y productos con precio mayor desde X metros.",
+            key=f"tipo_venta_pre_{form_nonce}"
+        )
+
+        unidad_opts = ["unidad", "paquete", "metro", "rollo", "litro", "caja"]
+        unidad_default = "metro" if tipo_venta_pre == "metro" else (prod["unidad_base"] if prod and prod["unidad_base"] in unidad_opts else "unidad")
+        unidad_base_pre = st.selectbox(
+            "Unidad base",
+            unidad_opts,
+            index=unidad_opts.index(unidad_default),
+            key=f"unidad_base_pre_{form_nonce}"
+        )
+
+        es_producto_metro_form = unidad_base_pre == "metro" or tipo_venta_pre == "metro"
+        tipo_venta = "metro" if es_producto_metro_form else "normal"
+        unidad_base = "metro" if es_producto_metro_form else unidad_base_pre
+
+        if es_producto_metro_form:
+            st.info(
+                "Producto configurado para venta por metros. "
+                "Carga los datos reales en la sección 'Venta por metro / laminados'."
+            )
+
         with st.form(f"producto_form_{form_nonce}"):
             desc = st.text_input("Descripción", value=prod["descripcion"] if prod else "")
             cat_sel = st.selectbox("Categoría", cat_names, index=cat_names.index(current_cat_name) if current_cat_name in cat_names else 0)
-
-            tipo_actual = producto_tipo_venta(prod) if prod else "normal"
-            opciones_tipo_venta = ["normal", "metro"]
-            tipo_venta = st.selectbox(
-                "Tipo de venta",
-                opciones_tipo_venta,
-                index=opciones_tipo_venta.index(tipo_actual) if tipo_actual in opciones_tipo_venta else 0,
-                format_func=lambda x: "Unidad / presentación / bulto" if x == "normal" else "Por metro / laminado",
-                help="Usa 'Por metro' para laminados, viniles por metro, rollos y productos con precio mayor desde X metros."
-            )
-
-            unidad_opts = ["unidad", "paquete", "metro", "rollo", "litro", "caja"]
-            unidad_default = "metro" if tipo_venta == "metro" else (prod["unidad_base"] if prod and prod["unidad_base"] in unidad_opts else "unidad")
-            unidad_base = st.selectbox("Unidad base", unidad_opts, index=unidad_opts.index(unidad_default))
-
-            # La sección de metros solo aparece cuando la unidad base es metro.
-            # Además, si la unidad base es metro, el sistema tratará el producto como venta por metro.
-            es_producto_metro_form = unidad_base == "metro"
-            if es_producto_metro_form:
-                tipo_venta = "metro"
-                st.info(
-                    "Producto configurado para venta por metros. "
-                    "Carga los datos reales en la sección 'Venta por metro / laminados'."
-                )
 
             c1, c2, c3 = st.columns(3)
             precio_unidad = c1.number_input(
@@ -3272,6 +3280,13 @@ def admin_productos():
             if es_producto_metro_form:
                 maneja_docena = False
                 maneja_bulto = False
+
+            es_producto_rollo_form = unidad_base == "rollo" and not es_producto_metro_form
+            if es_producto_rollo_form:
+                st.info(
+                    "Unidad base configurada como rollo. Puedes manejarlo como unidad/rollo normal, "
+                    "o activar bulto si vendes cajas de varios rollos. Si vendes por metros, selecciona Unidad base = metro."
+                )
 
             c8, c9 = st.columns(2)
             bulto_contiene = c8.number_input(
