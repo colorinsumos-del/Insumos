@@ -41,7 +41,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V79 Fix3 Pago Sugerido en Cero Fix4 Crédito Residual Fix5 Cierre Crédito Total"
+APP_NAME = "Sistema de Insumos al Mayor V79 Fix3 Pago Sugerido en Cero Fix4 Crédito Residual Fix5 Cierre Crédito Total Fix6 Laminados por Metro"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -403,6 +403,9 @@ def texto_agregado_presentacion(presentacion: str, cantidad_presentacion: int, u
     cantidad_presentacion = int(cantidad_presentacion or 1)
     unidades_base_total = int(unidades_base_total or 0)
 
+    if presentacion == "metro":
+        return f"{unidades_base_total} m"
+
     if presentacion == "unidad":
         if unidades_base_total == 1:
             return "1 unidad"
@@ -437,6 +440,7 @@ def resumen_producto_en_carrito(username: str, sku: str):
         "unidad": 0,
         "docena": 0,
         "bulto": 0,
+        "metro": 0,
         "total_usd": 0.0,
     }
     for item in carrito.values():
@@ -453,6 +457,9 @@ def resumen_producto_en_carrito(username: str, sku: str):
 
 def texto_resumen_producto_en_carrito(resumen):
     partes = []
+    if resumen.get("metro", 0):
+        m = int(resumen["metro"])
+        partes.append(f"{m} m")
     if resumen.get("unidad", 0):
         u = int(resumen["unidad"])
         partes.append(f"{u} unidad" if u == 1 else f"{u} unidades")
@@ -877,6 +884,15 @@ def init_db():
     # Fix38: Crédito BCV + presentación intermedia flexible
     add_col("productos", "presentacion_intermedia_nombre", "TEXT DEFAULT 'Docena'")
     add_col("productos", "presentacion_intermedia_cantidad", "INTEGER DEFAULT 12")
+
+    # Fix6: productos por metro / laminados
+    add_col("productos", "tipo_venta", "TEXT DEFAULT 'normal'")
+    add_col("productos", "precio_metro_detal", "REAL DEFAULT 0")
+    add_col("productos", "precio_metro_mayor", "REAL DEFAULT 0")
+    add_col("productos", "mayor_desde_metros", "INTEGER DEFAULT 10")
+    add_col("productos", "metros_por_rollo", "INTEGER DEFAULT 100")
+    add_col("productos", "costo_rollo", "REAL DEFAULT 0")
+    add_col("productos", "envio_costo_rollo", "REAL DEFAULT 0")
 
     add_col("pedidos", "tasa_bcv", "REAL DEFAULT 0")
     add_col("pedidos", "credito_tipo", "TEXT DEFAULT 'usd'")
@@ -1858,6 +1874,9 @@ def aplicar_abono_validado(abono_id, admin_username):
 
 
 def producto_precio_presentacion(prod, presentacion):
+    if presentacion == "metro":
+        cfg = producto_metro_config(prod)
+        return float(cfg["precio_detal"] or 0), 1
     if presentacion == "unidad":
         return float(prod["precio_unidad"] or 0), 1
     if presentacion == "docena":
@@ -1871,6 +1890,8 @@ def producto_precio_presentacion(prod, presentacion):
 
 def calcular_precio_inteligente(prod, presentacion, cantidad_presentacion):
     cantidad_presentacion = int(cantidad_presentacion or 1)
+    if producto_es_metro(prod) or str(presentacion or "").lower() == "metro":
+        return calcular_precio_metro(prod, cantidad_presentacion)
     precio_unidad = float(prod["precio_unidad"] or 0)
     precio_intermedia = float(prod["precio_docena"] or 0)
     precio_bulto = float(prod["precio_bulto"] or 0)
@@ -1932,6 +1953,14 @@ def calcular_precio_inteligente(prod, presentacion, cantidad_presentacion):
 
 def disponibilidad(prod):
     stock = int(prod["wc_stock"] or 0)
+    if producto_es_metro(prod):
+        return {
+            "unidades": stock,
+            "metros": stock,
+            "docenas": 0,
+            "bultos": stock // max(1, int(producto_metro_config(prod)["metros_por_rollo"] or 100)),
+            "resto_bulto": stock % max(1, int(producto_metro_config(prod)["metros_por_rollo"] or 100)),
+        }
     bulto_contiene = int(prod["bulto_contiene"] or 1)
     intermedia_cant = producto_intermedia_cantidad(prod)
     return {
@@ -2089,8 +2118,123 @@ def producto_intermedia_cantidad(prod):
 def producto_intermedia_label(prod):
     return f"{producto_intermedia_nombre(prod)} x{producto_intermedia_cantidad(prod)}"
 
+
+def producto_val(prod, key, default=None):
+    """Obtiene valores de producto compatible con sqlite3.Row y dict."""
+    try:
+        if isinstance(prod, dict):
+            return prod.get(key, default)
+        if hasattr(prod, "keys") and key in prod.keys():
+            return prod[key]
+    except Exception:
+        pass
+    return default
+
+
+def producto_tipo_venta(prod):
+    return str(producto_val(prod, "tipo_venta", "normal") or "normal").strip().lower()
+
+
+def producto_es_metro(prod):
+    return producto_tipo_venta(prod) in ["metro", "por_metro", "laminado"]
+
+
+def producto_metro_config(prod):
+    detal = float(producto_val(prod, "precio_metro_detal", 0) or producto_val(prod, "precio_unidad", 0) or 0)
+    mayor = float(producto_val(prod, "precio_metro_mayor", 0) or producto_val(prod, "precio_docena", 0) or 0)
+    try:
+        desde = int(producto_val(prod, "mayor_desde_metros", 10) or 10)
+    except Exception:
+        desde = 10
+    try:
+        rollo = int(producto_val(prod, "metros_por_rollo", 100) or producto_val(prod, "bulto_contiene", 100) or 100)
+    except Exception:
+        rollo = 100
+    desde = max(1, desde)
+    rollo = max(1, rollo)
+    return {
+        "precio_detal": detal,
+        "precio_mayor": mayor,
+        "mayor_desde": desde,
+        "metros_por_rollo": rollo,
+    }
+
+
+def calcular_precio_metro(prod, metros):
+    metros = int(metros or 1)
+    metros = max(1, metros)
+    cfg = producto_metro_config(prod)
+    precio_detal = float(cfg["precio_detal"] or 0)
+    precio_mayor = float(cfg["precio_mayor"] or 0)
+    mayor_desde = int(cfg["mayor_desde"] or 10)
+
+    if metros >= mayor_desde and precio_mayor > 0:
+        precio_m = precio_mayor
+        escala = f"Mayor desde {mayor_desde} m"
+    else:
+        precio_m = precio_detal
+        escala = "Metro detal"
+
+    return {
+        "precio_total": precio_m * metros,
+        "unidades_base_total": metros,
+        "precio_presentacion": precio_m,
+        "equivalencia": 1,
+        "escala_aplicada": escala,
+        "detalle_precio": f"{metros} m · {escala}",
+        "presentacion_nombre": "Metro",
+        "presentacion_label": "Metro",
+    }
+
+
+def calc_costos_margen_metro(prod):
+    cfg = producto_metro_config(prod)
+    metros_rollo = int(cfg["metros_por_rollo"] or 100)
+    costo_rollo = float(producto_val(prod, "costo_rollo", 0) or 0)
+    envio_rollo = float(producto_val(prod, "envio_costo_rollo", 0) or producto_val(prod, "envio_costo_bulto", 0) or 0)
+    costo_unit_compat = float(producto_val(prod, "costo_proveedor_unitario", 0) or 0)
+
+    costo_producto_m = (costo_rollo / metros_rollo) if costo_rollo > 0 and metros_rollo > 0 else costo_unit_compat
+    costo_envio_m = (envio_rollo / metros_rollo) if metros_rollo > 0 else 0
+    costo_real_m = costo_producto_m + costo_envio_m
+
+    def margen(precio):
+        precio = float(precio or 0)
+        gan = precio - costo_real_m
+        pct = (gan / precio * 100) if precio > 0 else 0
+        return {"precio": precio, "ganancia": gan, "margen_pct": pct}
+
+    detal = margen(cfg["precio_detal"])
+    mayor = margen(cfg["precio_mayor"])
+
+    ingreso_rollo_detal = cfg["precio_detal"] * metros_rollo
+    ingreso_rollo_mayor = cfg["precio_mayor"] * metros_rollo
+    costo_total_rollo = costo_rollo + envio_rollo if costo_rollo > 0 else costo_real_m * metros_rollo
+
+    return {
+        "metros_por_rollo": metros_rollo,
+        "mayor_desde": cfg["mayor_desde"],
+        "costo_rollo": costo_rollo,
+        "envio_rollo": envio_rollo,
+        "costo_producto_m": costo_producto_m,
+        "costo_envio_m": costo_envio_m,
+        "costo_real_m": costo_real_m,
+        "detal": detal,
+        "mayor": mayor,
+        "ingreso_rollo_detal": ingreso_rollo_detal,
+        "ingreso_rollo_mayor": ingreso_rollo_mayor,
+        "costo_total_rollo": costo_total_rollo,
+        "ganancia_rollo_detal": ingreso_rollo_detal - costo_total_rollo,
+        "ganancia_rollo_mayor": ingreso_rollo_mayor - costo_total_rollo,
+        "margen_rollo_detal": ((ingreso_rollo_detal - costo_total_rollo) / ingreso_rollo_detal * 100) if ingreso_rollo_detal > 0 else 0,
+        "margen_rollo_mayor": ((ingreso_rollo_mayor - costo_total_rollo) / ingreso_rollo_mayor * 100) if ingreso_rollo_mayor > 0 else 0,
+    }
+
+
 def presentacion_display_item(item):
     p = str(item.get("presentacion", "unidad"))
+    if p == "metro":
+        return "Metro"
     if p == "docena":
         return item.get("presentacion_nombre") or item.get("presentacion_label") or "Docena"
     if p == "bulto":
@@ -2210,6 +2354,9 @@ def texto_linea_carrito(item):
     nombre = presentacion_display_item(item)
     extra = " · ⭐ precio especial" if item.get("precio_especial_aplicado") else ""
 
+    if presentacion == "metro":
+        detalle = item.get("escala_aplicada", "Metro")
+        return f"{unidades} m · {detalle}{extra}"
     if presentacion == "unidad":
         return f"{unidades} unidad(es){extra}"
     return f"{cantidad} {nombre}(s) · {unidades} unidad(es){extra}"
@@ -2221,6 +2368,8 @@ def resumen_presentacion_catalogo(prod, presentacion, cantidad):
     calc = calcular_precio_inteligente(prod, presentacion, cantidad)
     unidades = int(calc["unidades_base_total"])
     total = float(calc["precio_total"])
+    if presentacion == "metro":
+        return f"{unidades} m · {calc['escala_aplicada']} · Total: {money_usd(total)}"
     if presentacion == "unidad":
         return f"{unidades} unidad(es) · Precio aplicado: {calc['escala_aplicada']} · Total: {money_usd(total)}"
     if cantidad == 1:
@@ -2234,6 +2383,9 @@ def formato_cantidad_pdf(item):
     escala = str(item.get("escala_aplicada", "")).lower()
     unidades = int(item.get("unidades_base_total", item.get("cantidad_presentacion", 1)) or 1)
     cantidad_pres = int(item.get("cantidad_presentacion", 1) or 1)
+
+    if presentacion == "metro":
+        return str(unidades), "m"
 
     if presentacion == "bulto":
         cant = "BULTO" if cantidad_pres == 1 else f"BULTO x{cantidad_pres}"
@@ -2924,7 +3076,7 @@ def admin_productos():
             params.extend([f"%{bus}%", f"%{bus}%"])
         sql += " ORDER BY p.activo DESC, c.orden, p.descripcion"
         df = pd.read_sql_query(sql, get_conn(), params=params)
-        cols_prod = ["sku","descripcion","categoria","precio_unidad","presentacion_intermedia_nombre","presentacion_intermedia_cantidad","precio_docena","precio_bulto","bulto_contiene","peso_unidad_kg","wc_stock","activo","visible_tienda","es_variante","grupo_variantes","nombre_visible_grupo","atributo_medida","atributo_color","orden_variante","ultima_sync"]
+        cols_prod = ["sku","descripcion","categoria","tipo_venta","precio_unidad","precio_metro_detal","precio_metro_mayor","mayor_desde_metros","metros_por_rollo","presentacion_intermedia_nombre","presentacion_intermedia_cantidad","precio_docena","precio_bulto","bulto_contiene","peso_unidad_kg","wc_stock","activo","visible_tienda","es_variante","grupo_variantes","nombre_visible_grupo","atributo_medida","atributo_color","orden_variante","ultima_sync"]
         st.dataframe(
             df[cols_prod],
             use_container_width=True,
@@ -3003,7 +3155,20 @@ def admin_productos():
         with st.form("producto_form"):
             desc = st.text_input("Descripción", value=prod["descripcion"] if prod else "")
             cat_sel = st.selectbox("Categoría", cat_names, index=cat_names.index(current_cat_name) if current_cat_name in cat_names else 0)
-            unidad_base = st.selectbox("Unidad base", ["unidad", "paquete", "rollo", "litro", "caja"], index=["unidad","paquete","rollo","litro","caja"].index(prod["unidad_base"]) if prod and prod["unidad_base"] in ["unidad","paquete","rollo","litro","caja"] else 0)
+
+            tipo_actual = producto_tipo_venta(prod) if prod else "normal"
+            opciones_tipo_venta = ["normal", "metro"]
+            tipo_venta = st.selectbox(
+                "Tipo de venta",
+                opciones_tipo_venta,
+                index=opciones_tipo_venta.index(tipo_actual) if tipo_actual in opciones_tipo_venta else 0,
+                format_func=lambda x: "Unidad / presentación / bulto" if x == "normal" else "Por metro / laminado",
+                help="Usa 'Por metro' para laminados, viniles por metro, rollos y productos con precio mayor desde X metros."
+            )
+
+            unidad_opts = ["unidad", "paquete", "metro", "rollo", "litro", "caja"]
+            unidad_default = "metro" if tipo_venta == "metro" else (prod["unidad_base"] if prod and prod["unidad_base"] in unidad_opts else "unidad")
+            unidad_base = st.selectbox("Unidad base", unidad_opts, index=unidad_opts.index(unidad_default))
 
             c1, c2, c3 = st.columns(3)
             precio_unidad = c1.number_input("Precio unidad USD", min_value=0.0, value=float(prod["precio_unidad"] if prod else 0), step=0.01)
@@ -3029,6 +3194,23 @@ def admin_productos():
 
             c8, c9 = st.columns(2)
             bulto_contiene = c8.number_input("Bulto contiene unidades base", min_value=1, max_value=9999, value=int(prod["bulto_contiene"] if prod and prod["bulto_contiene"] else 1), step=1)
+
+            st.markdown("#### Venta por metro / laminados")
+            st.caption("Estos campos se usan cuando el Tipo de venta es Por metro. Ejemplo: laminado al frío 30 cm x 100 m, mayor desde 10 m.")
+            lm1, lm2, lm3, lm4 = st.columns(4)
+            precio_metro_detal_default = float(prod["precio_metro_detal"] if prod and "precio_metro_detal" in prod.keys() and prod["precio_metro_detal"] else (prod["precio_unidad"] if prod else 0))
+            precio_metro_mayor_default = float(prod["precio_metro_mayor"] if prod and "precio_metro_mayor" in prod.keys() and prod["precio_metro_mayor"] else (prod["precio_docena"] if prod else 0))
+            precio_metro_detal = lm1.number_input("Metro detal USD", min_value=0.0, value=precio_metro_detal_default, step=0.01, disabled=tipo_venta != "metro")
+            precio_metro_mayor = lm2.number_input("Metro mayor USD", min_value=0.0, value=precio_metro_mayor_default, step=0.01, disabled=tipo_venta != "metro")
+            mayor_desde_metros = lm3.number_input("Mayor desde metros", min_value=1, max_value=9999, value=int(prod["mayor_desde_metros"] if prod and "mayor_desde_metros" in prod.keys() and prod["mayor_desde_metros"] else 10), step=1, disabled=tipo_venta != "metro")
+            metros_por_rollo = lm4.number_input("Rollo contiene metros", min_value=1, max_value=9999, value=int(prod["metros_por_rollo"] if prod and "metros_por_rollo" in prod.keys() and prod["metros_por_rollo"] else 100), step=1, disabled=tipo_venta != "metro")
+
+            lm5, lm6 = st.columns(2)
+            costo_rollo = lm5.number_input("Costo del rollo USD", min_value=0.0, value=float(prod["costo_rollo"] if prod and "costo_rollo" in prod.keys() and prod["costo_rollo"] else 0), step=0.01, disabled=tipo_venta != "metro")
+            envio_costo_rollo = lm6.number_input("Envío del rollo USD", min_value=0.0, value=float(prod["envio_costo_rollo"] if prod and "envio_costo_rollo" in prod.keys() and prod["envio_costo_rollo"] else 0), step=0.01, disabled=tipo_venta != "metro")
+            if tipo_venta == "metro":
+                costo_metro_preview = ((float(costo_rollo or 0) + float(envio_costo_rollo or 0)) / max(1, int(metros_por_rollo or 1)))
+                st.info(f"Costo real estimado por metro: {money_usd(costo_metro_preview)} · Mayor automático desde {int(mayor_desde_metros)} m.")
 
             c10, c11 = st.columns(2)
             peso = c10.number_input(
@@ -3161,6 +3343,31 @@ def admin_productos():
                    1 if pub_web else 0, 1 if pub_instagram else 0, 1 if pub_mercadolibre else 0, 1 if pub_marketplace else 0, 1 if pub_whatsapp else 0,
                    link_instagram, link_mercadolibre, link_marketplace, notas_publicacion,
                    now(), now()))
+                # Configuración especial para venta por metro / laminados.
+                if tipo_venta == "metro":
+                    costo_proveedor_unitario_metro = (float(costo_rollo or 0) / max(1, int(metros_por_rollo or 1))) if float(costo_rollo or 0) > 0 else float(costo_proveedor_unitario or 0)
+                    q("""UPDATE productos
+                         SET tipo_venta=?, unidad_base='metro',
+                             precio_metro_detal=?, precio_metro_mayor=?, mayor_desde_metros=?, metros_por_rollo=?,
+                             costo_rollo=?, envio_costo_rollo=?,
+                             precio_unidad=?, precio_docena=?, bulto_contiene=?,
+                             costo_proveedor_unitario=?, envio_costo_bulto=?,
+                             maneja_docena=0, maneja_bulto=0,
+                             actualizado_en=?
+                         WHERE sku=?""",
+                      (tipo_venta, precio_metro_detal, precio_metro_mayor, int(mayor_desde_metros), int(metros_por_rollo),
+                       costo_rollo, envio_costo_rollo,
+                       precio_metro_detal, precio_metro_mayor, int(metros_por_rollo),
+                       costo_proveedor_unitario_metro, envio_costo_rollo,
+                       now(), sku_e.strip()))
+                else:
+                    q("""UPDATE productos
+                         SET tipo_venta=?, precio_metro_detal=?, precio_metro_mayor=?, mayor_desde_metros=?, metros_por_rollo=?,
+                             costo_rollo=?, envio_costo_rollo=?, actualizado_en=?
+                         WHERE sku=?""",
+                      (tipo_venta, precio_metro_detal, precio_metro_mayor, int(mayor_desde_metros), int(metros_por_rollo),
+                       costo_rollo, envio_costo_rollo, now(), sku_e.strip()))
+
                 q("""UPDATE productos
                      SET visible_tienda=?, es_variante=?, grupo_variantes=?, nombre_visible_grupo=?,
                          atributo_medida=?, atributo_color=?, orden_variante=?, actualizado_en=?
@@ -6227,6 +6434,115 @@ def control_pos():
 
 
 
+
+def rentabilidad_producto_metro(prod):
+    st.title("💰 Rentabilidad por Metro / Laminados")
+    st.caption("Simula costos de rollo, envío y precio por metro sin afectar el producto hasta guardar.")
+
+    col_img, col_base = st.columns([1.1, 3])
+    with col_img:
+        if prod["wc_imagen_url"]:
+            st.image(prod["wc_imagen_url"], use_container_width=True)
+        else:
+            st.markdown("<div style='height:220px;border-radius:14px;background:#f3f4f6;display:flex;align-items:center;justify-content:center;font-size:44px'>📏</div>", unsafe_allow_html=True)
+
+    cfg = producto_metro_config(prod)
+    with col_base:
+        st.markdown(f"### {prod['descripcion']}")
+        st.caption(f"SKU: {prod['sku']} · Venta por metro · Stock: {int(prod['wc_stock'] or 0)} m")
+
+        s1, s2, s3, s4 = st.columns(4)
+        precio_detal = s1.number_input("Venta metro detal", min_value=0.0, value=float(cfg["precio_detal"] or 0), step=0.01)
+        precio_mayor = s2.number_input("Venta metro mayor", min_value=0.0, value=float(cfg["precio_mayor"] or 0), step=0.01)
+        mayor_desde = s3.number_input("Mayor desde m", min_value=1, max_value=9999, value=int(cfg["mayor_desde"] or 10), step=1)
+        metros_rollo = s4.number_input("Metros por rollo", min_value=1, max_value=9999, value=int(cfg["metros_por_rollo"] or 100), step=1)
+
+        c1, c2, c3 = st.columns(3)
+        costo_rollo = c1.number_input("Costo rollo", min_value=0.0, value=float(producto_val(prod, "costo_rollo", 0) or 0), step=0.01)
+        envio_rollo = c2.number_input("Envío rollo", min_value=0.0, value=float(producto_val(prod, "envio_costo_rollo", 0) or producto_val(prod, "envio_costo_bulto", 0) or 0), step=0.01)
+        margen_obj = c3.number_input("Margen objetivo %", min_value=0.0, max_value=90.0, value=float(prod["margen_minimo_pct"] or 25), step=1.0)
+
+    sim = dict(prod)
+    sim.update({
+        "tipo_venta": "metro",
+        "precio_metro_detal": precio_detal,
+        "precio_metro_mayor": precio_mayor,
+        "mayor_desde_metros": mayor_desde,
+        "metros_por_rollo": metros_rollo,
+        "costo_rollo": costo_rollo,
+        "envio_costo_rollo": envio_rollo,
+        "margen_minimo_pct": margen_obj,
+    })
+    m = calc_costos_margen_metro(sim)
+    sugerido = precio_sugerido_por_margen(m["costo_real_m"], margen_obj)
+
+    st.markdown("---")
+    a1, a2, a3, a4 = st.columns(4)
+    a1.metric("Costo producto / m", money_usd(m["costo_producto_m"]))
+    a2.metric("Envío / m", money_usd(m["costo_envio_m"]))
+    a3.metric("Costo real / m", money_usd(m["costo_real_m"]))
+    a4.metric("Precio sugerido / m", money_usd(sugerido))
+
+    st.markdown("### Margen por metro")
+    d1, d2 = st.columns(2)
+    for col, titulo, data in [(d1, "Metro detal", m["detal"]), (d2, f"Metro mayor desde {int(mayor_desde)} m", m["mayor"])]:
+        with col:
+            estado = etiqueta_margen(data["margen_pct"], margen_obj)
+            st.markdown(f"""
+            <div class="card">
+                <div style="font-weight:900;font-size:1.15rem;">{titulo}</div>
+                <div class="muted">Precio venta</div>
+                <div style="font-weight:900;font-size:1.45rem;">{money_usd(data['precio'])}</div>
+                <div class="muted">Costo real / m: {money_usd(m['costo_real_m'])}</div>
+                <div style="font-weight:800;color:#047857;">Ganancia / m: {money_usd(data['ganancia'])}</div>
+                <div style="font-weight:900;">Margen: {data['margen_pct']:.1f}%</div>
+                <div>{estado}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    st.markdown("### Escenario por rollo completo")
+    r1, r2, r3, r4 = st.columns(4)
+    r1.metric("Ingreso rollo detal", money_usd(m["ingreso_rollo_detal"]))
+    r2.metric("Ingreso rollo mayor", money_usd(m["ingreso_rollo_mayor"]))
+    r3.metric("Costo total rollo", money_usd(m["costo_total_rollo"]))
+    r4.metric("Ganancia rollo mayor", money_usd(m["ganancia_rollo_mayor"]))
+
+    g1, g2 = st.columns(2)
+    g1.metric("Margen rollo detal", f"{m['margen_rollo_detal']:.1f}%")
+    g2.metric("Margen rollo mayor", f"{m['margen_rollo_mayor']:.1f}%")
+
+    st.markdown("### Simulación rápida de venta")
+    sv1, sv2 = st.columns(2)
+    metros_sim = sv1.number_input("Metros a vender", min_value=1, max_value=9999, value=int(mayor_desde), step=1)
+    calc = calcular_precio_metro(sim, int(metros_sim))
+    costo_sim = m["costo_real_m"] * int(metros_sim)
+    gan_sim = float(calc["precio_total"] or 0) - costo_sim
+    margen_sim = (gan_sim / float(calc["precio_total"]) * 100) if float(calc["precio_total"] or 0) > 0 else 0
+    sv2.markdown(f"""
+    <div class="card">
+        <div style="font-weight:900;">Venta simulada: {int(metros_sim)} m</div>
+        <div class="muted">Precio aplicado: {calc['escala_aplicada']}</div>
+        <div>Total venta: <b>{money_usd(calc['precio_total'])}</b></div>
+        <div>Costo: <b>{money_usd(costo_sim)}</b></div>
+        <div>Ganancia: <b>{money_usd(gan_sim)}</b></div>
+        <div>Margen: <b>{margen_sim:.1f}%</b></div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    if st.button("💾 Guardar configuración por metro", type="primary", use_container_width=True):
+        costo_unitario_metro = (float(costo_rollo or 0) / max(1, int(metros_rollo or 1))) if float(costo_rollo or 0) > 0 else float(prod["costo_proveedor_unitario"] or 0)
+        q("""UPDATE productos SET tipo_venta='metro', unidad_base='metro',
+             precio_metro_detal=?, precio_metro_mayor=?, mayor_desde_metros=?, metros_por_rollo=?,
+             costo_rollo=?, envio_costo_rollo=?, precio_unidad=?, precio_docena=?, bulto_contiene=?,
+             costo_proveedor_unitario=?, envio_costo_bulto=?, margen_minimo_pct=?, maneja_docena=0, maneja_bulto=0,
+             actualizado_en=? WHERE sku=?""",
+          (precio_detal, precio_mayor, int(mayor_desde), int(metros_rollo),
+           costo_rollo, envio_rollo, precio_detal, precio_mayor, int(metros_rollo),
+           costo_unitario_metro, envio_rollo, margen_obj, now(), prod["sku"]))
+        st.success("Configuración por metro guardada.")
+        st.rerun()
+
+
 def rentabilidad_productos():
     st.title("💰 Rentabilidad de Productos")
     st.caption("La rentabilidad real se calcula automáticamente según precio de venta y costo real. El % funciona como margen objetivo para sugerir precios.")
@@ -6281,6 +6597,10 @@ def rentabilidad_productos():
         help="Primero filtra por categoría y luego selecciona el producto de la lista."
     )
     prod = opts[seleccion]
+
+    if producto_es_metro(prod):
+        rentabilidad_producto_metro(prod)
+        return
 
     col_img, col_base = st.columns([1.1, 3])
     with col_img:
@@ -6391,7 +6711,7 @@ def rentabilidad_productos():
 
 def publicaciones():
     st.title("📢 Publicaciones")
-    df = pd.read_sql_query("""SELECT sku,descripcion,wc_stock,activo,pub_web,pub_instagram,pub_mercadolibre,pub_marketplace,pub_whatsapp,
+    df = pd.read_sql_query("""SELECT sku,descripcion,tipo_venta,wc_stock,activo,pub_web,pub_instagram,pub_mercadolibre,pub_marketplace,pub_whatsapp,
                               link_instagram,link_mercadolibre,link_marketplace,notas_publicacion
                               FROM productos ORDER BY descripcion""", get_conn())
     if df.empty:
@@ -6644,9 +6964,159 @@ def selector_cliente_venta_admin(user, key="cliente_venta_selector"):
     return get_user(mapa[sel]) or user
 
 
+
+def render_card_producto_metro(prod, user, cliente_precio=None):
+    cliente_precio = cliente_precio or user
+    tasa = get_tasa_proveedor()
+    stock = int(prod["wc_stock"] or 0)
+    img = prod["wc_imagen_url"]
+    cfg = producto_metro_config(prod)
+    precio_detal = float(cfg["precio_detal"] or 0)
+    precio_mayor = float(cfg["precio_mayor"] or 0)
+    mayor_desde = int(cfg["mayor_desde"] or 10)
+    metros_rollo = int(cfg["metros_por_rollo"] or 100)
+
+    try:
+        categoria_txt = prod["categoria"] if "categoria" in prod.keys() and prod["categoria"] else categoria_nombre(prod["categoria_id"])
+    except Exception:
+        categoria_txt = categoria_nombre(prod["categoria_id"])
+
+    st.markdown('<div class="catalog-list-card">', unsafe_allow_html=True)
+    col_img, col_info, col_actions = st.columns([1.15, 3.15, 1.55], vertical_alignment="top")
+
+    with col_img:
+        if img:
+            pad1, pad2, pad3 = st.columns([0.05, 0.90, 0.05])
+            with pad2:
+                st.image(img, width=175)
+        else:
+            st.markdown(
+                "<div class='catalog-image-frame' style='height:175px;display:flex;align-items:center;justify-content:center;'>"
+                "<div style='height:145px;width:145px;border-radius:12px;background:#f3f4f6;display:flex;align-items:center;justify-content:center;font-size:38px'>📏</div>"
+                "</div>",
+                unsafe_allow_html=True
+            )
+        if st.button("🔍 Ver imagen", key=f"zoom_{prod['sku']}", help="Ampliar imagen", use_container_width=True):
+            dialog_imagen(prod["descripcion"], prod["sku"], img)
+
+    with col_info:
+        st.markdown(f'<div class="catalog-list-title">{prod["descripcion"]}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="catalog-list-meta">SKU: {prod["sku"]} · {categoria_txt} · Venta por metro</div>', unsafe_allow_html=True)
+
+        if stock > 0 and prod["wc_stock_status"] != "outofstock":
+            st.markdown(f'<span class="badge badge-ok">Disponible: {stock} m</span>', unsafe_allow_html=True)
+        else:
+            st.markdown('<span class="badge badge-no">Sin stock</span>', unsafe_allow_html=True)
+
+        st.markdown('<div class="catalog-list-prices">', unsafe_allow_html=True)
+        st.markdown(f"<div class='price-main'>Metro detal: {money_usd(precio_detal)}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='price-bs'>{money_bs(precio_detal * tasa)}</div>", unsafe_allow_html=True)
+        if precio_mayor > 0:
+            st.markdown(
+                f"<div class='muted'>Metro mayor desde <b>{mayor_desde} m</b>: <b>{money_usd(precio_mayor)}</b> · {money_bs(precio_mayor * tasa)}</div>",
+                unsafe_allow_html=True
+            )
+        st.markdown(
+            f"<div class='muted'>Rollo configurado: <b>{metros_rollo} m</b></div>",
+            unsafe_allow_html=True
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        if user["rol"] in ["admin", "vendedor_mercadolibre"]:
+            com_ml = get_comision_ml_pct()
+            ml_detal_bs, ml_detal_bcv = precio_ml_resumen(precio_detal)
+            ml_mayor_bs, ml_mayor_bcv = precio_ml_resumen(precio_mayor)
+            st.markdown(
+                f"""
+                <div style="margin-top:8px;border:1px solid #dbeafe;background:#eff6ff;border-radius:12px;padding:8px;">
+                  <div style="font-weight:900;color:#1d4ed8;">Sugerido MercadoLibre (+{com_ml:.1f}%)</div>
+                  <div class="muted">Metro detal: <b>{money_bs(ml_detal_bs)}</b> · Eq. BCV ${ml_detal_bcv:,.2f}</div>
+                  <div class="muted">Metro mayor: <b>{money_bs(ml_mayor_bs)}</b> · Eq. BCV ${ml_mayor_bcv:,.2f}</div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+    with col_actions:
+        st.markdown('<div class="catalog-list-actions">', unsafe_allow_html=True)
+        st.markdown("<div class='muted' style='font-weight:900;'>Cantidad en metros</div>", unsafe_allow_html=True)
+        cantidad = st.number_input("Metros", min_value=1, max_value=9999, value=1, step=1, key=f"cant_metro_{prod['sku']}", label_visibility="collapsed")
+
+        precio_calc = calcular_precio_inteligente(prod, "metro", int(cantidad))
+        metros_total = int(precio_calc["unidades_base_total"])
+        precio_total_calc = float(precio_calc["precio_total"])
+        precio_m = float(precio_calc["precio_presentacion"])
+        escala_aplicada = precio_calc["escala_aplicada"]
+
+        st.markdown(
+            f"""
+            <div class="catalog-selection-box">
+              <div class="catalog-selection-title">Selección actual</div>
+              <div class="catalog-selection-value">{money_usd(precio_total_calc)}</div>
+              <div class="muted">{metros_total} m · {escala_aplicada}</div>
+              <div class="muted">{money_usd(precio_m)} por metro</div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        if metros_total > stock:
+            st.warning(f"No alcanza stock. Requiere {metros_total} m, disponible {stock} m.")
+            disabled = True
+        else:
+            disabled = False
+
+        show_producto_carrito_badge(user["username"], prod["sku"])
+
+        if st.button("🛒 Agregar", key=f"add_metro_{prod['sku']}", type="primary", use_container_width=True, disabled=disabled):
+            carrito = cargar_carrito(user["username"])
+            key = f"{prod['sku']}::metro"
+            cantidad_final = int(cantidad)
+            if key in carrito:
+                cantidad_final = int(carrito[key].get("cantidad_presentacion", 0) or 0) + int(cantidad)
+
+            item_tmp = {
+                "sku": prod["sku"],
+                "desc": prod["descripcion"],
+                "presentacion": "metro",
+                "escala_aplicada": escala_aplicada,
+                "detalle_precio": precio_calc.get("detalle_precio", escala_aplicada),
+                "presentacion_nombre": "Metro",
+                "presentacion_label": "Metro",
+                "cantidad_presentacion": cantidad_final,
+                "equivalencia": 1,
+                "unidades_base_total": metros_total,
+                "precio_presentacion": float(precio_m),
+                "precio_total": precio_total_calc,
+                "peso_total_kg": float(prod["peso_unidad_kg"] or 0) * int(metros_total),
+                "imagen_url": prod["wc_imagen_url"],
+                "cliente_precio_username": cliente_precio["username"],
+                "cliente_precio_nombre": cliente_precio["nombre"] or cliente_precio["username"],
+            }
+            carrito[key] = recalcular_item_carrito(item_tmp, cantidad_final, user=cliente_precio)
+            guardar_carrito(user["username"], carrito)
+            n_items, n_unidades, total_carrito = carrito_resumen_texto(user["username"])
+            set_last_cart_action(prod["descripcion"], "metro", int(cantidad), metros_total)
+            set_feedback(
+                f"Agregado al carrito: {metros_total} m. Carrito: {n_items} línea(s), {n_unidades} m/unidad(es), {money_usd(total_carrito)}.",
+                "success"
+            )
+            st.rerun()
+
+        st.markdown(
+            f'<div class="actions-foot-note">Mayor desde: <b>{mayor_desde} m</b> · Rollo: <b>{metros_rollo} m</b></div>',
+            unsafe_allow_html=True
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
 def render_card_producto(prod, user, cliente_precio=None):
     cliente_precio = cliente_precio or user
     prod = producto_con_precio_para_usuario(prod, cliente_precio)
+    if producto_es_metro(prod):
+        return render_card_producto_metro(prod, user, cliente_precio=cliente_precio)
     tasa = get_tasa_proveedor()
     stock = int(prod["wc_stock"] or 0)
     disp = disponibilidad(prod)
