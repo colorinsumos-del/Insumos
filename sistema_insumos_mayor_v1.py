@@ -41,7 +41,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V79 Fix3 Pago Sugerido en Cero Fix4 Crédito Residual Fix5 Cierre Crédito Total Fix6 Laminados por Metro Fix7 Laminado UI Clara Fix8 Laminado Form Editable"
+APP_NAME = "Sistema de Insumos al Mayor V79 Fix3 Pago Sugerido en Cero Fix4 Crédito Residual Fix5 Cierre Crédito Total Fix6 Laminados por Metro Fix7 Laminado UI Clara Fix8 Laminado Form Editable Fix9 Laminado Solo Metro Fix10 Nuevo Producto Limpio"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -3101,6 +3101,7 @@ def admin_productos():
                 a1, a2, a3, a4 = st.columns(4)
                 if a1.button("✏️ Cargar en edición", use_container_width=True, key=f"load_edit_{sku_accion}"):
                     st.session_state["sku_producto_editar"] = sku_accion
+                    st.session_state["producto_form_reset_counter"] = st.session_state.get("producto_form_reset_counter", 0) + 1
                     st.success("Producto cargado. Abre la pestaña Crear / Editar para modificarlo.")
                 activo_actual = int(prod_accion["activo"] or 0) == 1
                 texto_toggle = "⏸️ Desactivar" if activo_actual else "▶️ Activar"
@@ -3122,7 +3123,20 @@ def admin_productos():
     with tab_form:
         st.subheader("Crear o editar producto")
 
-        buscar_edit = st.text_input("Buscar producto para editar", placeholder="Escribe nombre o SKU del producto...")
+        if "producto_form_reset_counter" not in st.session_state:
+            st.session_state["producto_form_reset_counter"] = 0
+
+        n1, n2 = st.columns([1.2, 3])
+        if n1.button("➕ Crear producto nuevo", use_container_width=True, type="primary"):
+            st.session_state["sku_producto_editar"] = ""
+            st.session_state["producto_form_reset_counter"] = st.session_state.get("producto_form_reset_counter", 0) + 1
+            set_feedback("Formulario limpio. Puedes crear un producto desde cero.", "success")
+            st.rerun()
+        n2.caption("Usa este botón para limpiar el último producto editado y comenzar uno nuevo desde cero.")
+
+        form_nonce = st.session_state.get("producto_form_reset_counter", 0)
+
+        buscar_edit = st.text_input("Buscar producto para editar", placeholder="Escribe nombre o SKU del producto...", key=f"buscar_producto_editar_{form_nonce}")
         if buscar_edit:
             encontrados = q("""SELECT sku, descripcion FROM productos
                                 WHERE sku LIKE ? OR descripcion LIKE ?
@@ -3133,11 +3147,17 @@ def admin_productos():
                 sel_prod = st.selectbox("Resultados", list(opts_prod.keys()))
                 if st.button("Cargar producto seleccionado", use_container_width=True):
                     st.session_state["sku_producto_editar"] = opts_prod[sel_prod]
+                    st.session_state["producto_form_reset_counter"] = st.session_state.get("producto_form_reset_counter", 0) + 1
                     st.rerun()
             else:
                 st.info("No se encontraron productos con esa búsqueda.")
 
-        sku_e = st.text_input("SKU", value=st.session_state.get("sku_producto_editar", ""))
+        sku_e = st.text_input(
+            "SKU",
+            value=st.session_state.get("sku_producto_editar", ""),
+            key=f"sku_producto_editar_input_{form_nonce}",
+            placeholder="Ejemplo: PAP-FOTO-180"
+        )
         prod = q("SELECT * FROM productos WHERE sku=?", (sku_e.strip(),), fetch=True) if sku_e.strip() else []
         prod = prod[0] if prod else None
 
@@ -3152,7 +3172,7 @@ def admin_productos():
                     current_cat_name = name
                     break
 
-        with st.form("producto_form"):
+        with st.form(f"producto_form_{form_nonce}"):
             desc = st.text_input("Descripción", value=prod["descripcion"] if prod else "")
             cat_sel = st.selectbox("Categoría", cat_names, index=cat_names.index(current_cat_name) if current_cat_name in cat_names else 0)
 
@@ -3170,11 +3190,13 @@ def admin_productos():
             unidad_default = "metro" if tipo_venta == "metro" else (prod["unidad_base"] if prod and prod["unidad_base"] in unidad_opts else "unidad")
             unidad_base = st.selectbox("Unidad base", unidad_opts, index=unidad_opts.index(unidad_default))
 
-            es_producto_metro_form = tipo_venta == "metro"
+            # La sección de metros solo aparece cuando la unidad base es metro.
+            # Además, si la unidad base es metro, el sistema tratará el producto como venta por metro.
+            es_producto_metro_form = unidad_base == "metro"
             if es_producto_metro_form:
+                tipo_venta = "metro"
                 st.info(
                     "Producto configurado para venta por metros. "
-                    "Los campos normales de Unidad / presentación / bulto quedan bloqueados. "
                     "Carga los datos reales en la sección 'Venta por metro / laminados'."
                 )
 
@@ -3262,20 +3284,29 @@ def admin_productos():
                 help="No aplica para productos por metro. Usa 'Rollo contiene metros'."
             )
 
-            st.markdown("#### Venta por metro / laminados")
-            st.caption("Aquí cargas los datos reales del laminado. Aunque el selector está dentro de un formulario, esta sección queda editable siempre para evitar el cursor de prohibido. Solo se usa al guardar si el Tipo de venta es Por metro / laminado.")
-            lm1, lm2, lm3, lm4 = st.columns(4)
+            # Valores por defecto para que el guardado funcione aunque la sección esté oculta.
             precio_metro_detal_default = float(prod["precio_metro_detal"] if prod and "precio_metro_detal" in prod.keys() and prod["precio_metro_detal"] else (prod["precio_unidad"] if prod else 0))
             precio_metro_mayor_default = float(prod["precio_metro_mayor"] if prod and "precio_metro_mayor" in prod.keys() and prod["precio_metro_mayor"] else (prod["precio_docena"] if prod else 0))
-            precio_metro_detal = lm1.number_input("Metro detal USD", min_value=0.0, value=precio_metro_detal_default, step=0.01, help="Editable siempre. Solo se usa al guardar si el Tipo de venta es Por metro / laminado.")
-            precio_metro_mayor = lm2.number_input("Metro mayor USD", min_value=0.0, value=precio_metro_mayor_default, step=0.01, help="Editable siempre. Solo se usa al guardar si el Tipo de venta es Por metro / laminado.")
-            mayor_desde_metros = lm3.number_input("Mayor desde metros", min_value=1, max_value=9999, value=int(prod["mayor_desde_metros"] if prod and "mayor_desde_metros" in prod.keys() and prod["mayor_desde_metros"] else 10), step=1, help="Editable siempre. Solo se usa al guardar si el Tipo de venta es Por metro / laminado.")
-            metros_por_rollo = lm4.number_input("Rollo contiene metros", min_value=1, max_value=9999, value=int(prod["metros_por_rollo"] if prod and "metros_por_rollo" in prod.keys() and prod["metros_por_rollo"] else 100), step=1, help="Editable siempre. Solo se usa al guardar si el Tipo de venta es Por metro / laminado.")
+            precio_metro_detal = precio_metro_detal_default
+            precio_metro_mayor = precio_metro_mayor_default
+            mayor_desde_metros = int(prod["mayor_desde_metros"] if prod and "mayor_desde_metros" in prod.keys() and prod["mayor_desde_metros"] else 10)
+            metros_por_rollo = int(prod["metros_por_rollo"] if prod and "metros_por_rollo" in prod.keys() and prod["metros_por_rollo"] else 100)
+            costo_rollo = float(prod["costo_rollo"] if prod and "costo_rollo" in prod.keys() and prod["costo_rollo"] else 0)
+            envio_costo_rollo = float(prod["envio_costo_rollo"] if prod and "envio_costo_rollo" in prod.keys() and prod["envio_costo_rollo"] else 0)
 
-            lm5, lm6 = st.columns(2)
-            costo_rollo = lm5.number_input("Costo del rollo USD", min_value=0.0, value=float(prod["costo_rollo"] if prod and "costo_rollo" in prod.keys() and prod["costo_rollo"] else 0), step=0.01, help="Editable siempre. Solo se usa al guardar si el Tipo de venta es Por metro / laminado.")
-            envio_costo_rollo = lm6.number_input("Envío del rollo USD", min_value=0.0, value=float(prod["envio_costo_rollo"] if prod and "envio_costo_rollo" in prod.keys() and prod["envio_costo_rollo"] else 0), step=0.01, help="Editable siempre. Solo se usa al guardar si el Tipo de venta es Por metro / laminado.")
-            if tipo_venta == "metro":
+            if es_producto_metro_form:
+                st.markdown("#### Venta por metro / laminados")
+                st.caption("Esta sección solo aparece cuando la Unidad base es metro. Ejemplo: laminado al frío 30 cm x 100 m, mayor desde 10 m.")
+                lm1, lm2, lm3, lm4 = st.columns(4)
+                precio_metro_detal = lm1.number_input("Metro detal USD", min_value=0.0, value=precio_metro_detal_default, step=0.01)
+                precio_metro_mayor = lm2.number_input("Metro mayor USD", min_value=0.0, value=precio_metro_mayor_default, step=0.01)
+                mayor_desde_metros = lm3.number_input("Mayor desde metros", min_value=1, max_value=9999, value=mayor_desde_metros, step=1)
+                metros_por_rollo = lm4.number_input("Rollo contiene metros", min_value=1, max_value=9999, value=metros_por_rollo, step=1)
+
+                lm5, lm6 = st.columns(2)
+                costo_rollo = lm5.number_input("Costo del rollo USD", min_value=0.0, value=costo_rollo, step=0.01)
+                envio_costo_rollo = lm6.number_input("Envío del rollo USD", min_value=0.0, value=envio_costo_rollo, step=0.01)
+
                 costo_metro_preview = ((float(costo_rollo or 0) + float(envio_costo_rollo or 0)) / max(1, int(metros_por_rollo or 1)))
                 st.info(f"Costo real estimado por metro: {money_usd(costo_metro_preview)} · Mayor automático desde {int(mayor_desde_metros)} m. El stock de WooCommerce se interpretará como metros disponibles.")
 
@@ -3441,8 +3472,10 @@ def admin_productos():
                      WHERE sku=?""",
                   (1 if visible_tienda else 0, 1 if es_variante else 0, grupo_variantes.strip(), nombre_visible_grupo.strip(),
                    atributo_medida.strip(), atributo_color.strip(), int(orden_variante), now(), sku_e.strip()))
+                st.session_state["sku_producto_editar"] = sku_e.strip()
+                st.session_state["producto_form_reset_counter"] = st.session_state.get("producto_form_reset_counter", 0) + 1
                 st.success("Producto guardado.")
-                set_feedback(f"Producto guardado correctamente: {sku_e.strip()}.", "success")
+                set_feedback(f"Producto guardado correctamente: {sku_e.strip()}. Para crear otro, presiona ➕ Crear producto nuevo.", "success")
                 try:
                     ok, msg = sync_producto_wc(sku_e.strip())
                     if ok:
