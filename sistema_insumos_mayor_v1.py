@@ -41,7 +41,7 @@ from fpdf import FPDF
 # - El perfil Cliente BCV queda preparado pero inactivo/oculto por ahora.
 # ============================================================
 
-APP_NAME = "Sistema de Insumos al Mayor V79 Fix3 Pago Sugerido en Cero Fix4 Crédito Residual Fix5 Cierre Crédito Total Fix6 Laminados por Metro Fix7 Laminado UI Clara Fix8 Laminado Form Editable Fix9 Laminado Solo Metro Fix10 Nuevo Producto Limpio Fix11 Form Dinámico"
+APP_NAME = "Sistema de Insumos al Mayor V79 Fix3 Pago Sugerido en Cero Fix4 Crédito Residual Fix5 Cierre Crédito Total Fix6 Laminados por Metro Fix7 Laminado UI Clara Fix8 Laminado Form Editable Fix9 Laminado Solo Metro Fix10 Nuevo Producto Limpio Fix11 Form Dinámico Fix12 Vendedores 5%"
 DB_NAME = "insumos_mayor_v1.db"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -801,6 +801,20 @@ def init_db():
     )
     """)
 
+    q("""
+    CREATE TABLE IF NOT EXISTS vendedor_pagos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        vendedor_username TEXT,
+        fecha TEXT,
+        monto_usd REAL DEFAULT 0,
+        metodo TEXT,
+        referencia TEXT,
+        notas TEXT,
+        creado_por TEXT,
+        creado_en TEXT
+    )
+    """)
+
     def set_default(clave, valor):
         exists = q("SELECT clave FROM configuracion WHERE clave=?", (clave,), fetch=True)
         if not exists:
@@ -840,6 +854,12 @@ def init_db():
     add_col("usuarios", "cliente_especial", "INTEGER DEFAULT 0")
     add_col("usuarios", "id_usuario", "INTEGER DEFAULT 0")
     add_col("usuarios", "email", "TEXT")
+    # Fix12: vendedores, clientes asignados e incremento comercial.
+    add_col("usuarios", "vendedor_activo", "INTEGER DEFAULT 0")
+    add_col("usuarios", "vendedor_comision_pct", "REAL DEFAULT 0")
+    add_col("usuarios", "vendedor_puede_crear_clientes", "INTEGER DEFAULT 1")
+    add_col("usuarios", "vendedor_asignado_username", "TEXT")
+    add_col("usuarios", "vendedor_comision_override_pct", "REAL DEFAULT 0")
     # Asignar id_usuario automático a usuarios existentes/importados que no lo tengan.
     rows_sin_id = q("SELECT username FROM usuarios WHERE COALESCE(id_usuario,0)=0 ORDER BY creado_en, username", fetch=True)
     if rows_sin_id:
@@ -898,6 +918,13 @@ def init_db():
     add_col("pedidos", "credito_tipo", "TEXT DEFAULT 'usd'")
     add_col("pedidos", "total_bcv_credito", "REAL DEFAULT 0")
     add_col("pedidos", "pedido_token", "TEXT")
+    # Fix12: comisión comercial de vendedores guardada en cada pedido.
+    add_col("pedidos", "vendedor_username", "TEXT")
+    add_col("pedidos", "vendedor_nombre", "TEXT")
+    add_col("pedidos", "vendedor_pct", "REAL DEFAULT 0")
+    add_col("pedidos", "subtotal_base_usd", "REAL DEFAULT 0")
+    add_col("pedidos", "ganancia_vendedor_usd", "REAL DEFAULT 0")
+    add_col("pedidos", "ganancia_vendedor_status", "TEXT DEFAULT 'Pendiente'")
     try:
         q("CREATE UNIQUE INDEX IF NOT EXISTS idx_pedidos_pedido_token ON pedidos(pedido_token) WHERE pedido_token IS NOT NULL AND pedido_token<>''")
     except Exception:
@@ -1462,7 +1489,7 @@ def crear_respaldo(destino=None):
     destino.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    tablas = ["usuarios", "categorias", "productos", "cotizaciones", "pedidos", "creditos", "abonos", "metodos_pago", "carritos", "productos_vendedores", "nomina_trabajadores", "nomina_adelantos", "nomina_pagos", "configuracion"]
+    tablas = ["usuarios", "categorias", "productos", "cotizaciones", "pedidos", "creditos", "abonos", "metodos_pago", "carritos", "productos_vendedores", "vendedor_pagos", "nomina_trabajadores", "nomina_adelantos", "nomina_pagos", "configuracion"]
     data = {}
     for t in tablas:
         try:
@@ -1496,7 +1523,7 @@ def importar_respaldo_json(uploaded_file, modo="fusionar"):
 
     data = json.load(uploaded_file)
 
-    tablas = ["categorias", "usuarios", "productos", "cotizaciones", "pedidos", "creditos", "abonos", "metodos_pago", "carritos", "productos_vendedores", "nomina_trabajadores", "nomina_adelantos", "nomina_pagos", "configuracion"]
+    tablas = ["categorias", "usuarios", "productos", "cotizaciones", "pedidos", "creditos", "abonos", "metodos_pago", "carritos", "productos_vendedores", "vendedor_pagos", "nomina_trabajadores", "nomina_adelantos", "nomina_pagos", "configuracion"]
 
     if modo == "reemplazar":
         for t in ["abonos", "creditos", "pedidos", "cotizaciones", "productos", "categorias", "metodos_pago", "carritos", "productos_vendedores", "nomina_pagos", "nomina_adelantos", "nomina_trabajadores"]:
@@ -1745,6 +1772,13 @@ def crear_pedido_desde_carrito(user, carrito, tipo_pago, metodo_pago, envio_usd,
 
     t = calcular_carrito(carrito)
     subtotal = float(t["subtotal"])
+    subtotal_base = sum(float(i.get("precio_base_total", i.get("precio_total", 0)) or 0) for i in carrito.values())
+    ganancia_vendedor = sum(float(i.get("vendedor_ganancia_usd", 0) or 0) for i in carrito.values())
+    vendedor_info = vendedor_info_para_cliente(target_user)
+    vendedor_username = vendedor_info["username"] if vendedor_info and ganancia_vendedor > 0 else ""
+    vendedor_nombre = vendedor_info["nombre"] if vendedor_info and ganancia_vendedor > 0 else ""
+    vendedor_pct = float(vendedor_info["pct"]) if vendedor_info and ganancia_vendedor > 0 else 0.0
+
     total = subtotal + float(envio_usd or 0)
     tasa = get_tasa_proveedor()
     tasa_bcv = get_tasa_bcv()
@@ -1770,13 +1804,15 @@ def crear_pedido_desde_carrito(user, carrito, tipo_pago, metodo_pago, envio_usd,
     q("""INSERT INTO pedidos
          (fecha, username, cliente_nombre, cliente_rif, cliente_telefono, cliente_direccion, items,
           tipo_pago, metodo_pago, subtotal_usd, envio_usd, total_usd, tasa_proveedor, tasa_bcv,
-          total_bs_proveedor, peso_total_kg, status, notas, credito_tipo, total_bcv_credito, pedido_token)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+          total_bs_proveedor, peso_total_kg, status, notas, credito_tipo, total_bcv_credito, pedido_token,
+          vendedor_username, vendedor_nombre, vendedor_pct, subtotal_base_usd, ganancia_vendedor_usd, ganancia_vendedor_status)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
       (now(), username, cliente_nombre, cliente_rif, cliente_tel, cliente_dir, json.dumps(carrito, ensure_ascii=False),
        tipo_pago, metodo_pago, subtotal, float(envio_usd or 0), total, tasa, tasa_bcv,
        total_bs_base, t["peso_total_kg"],
        "Crédito en curso" if tipo_pago == "credito" else "Pendiente de pago",
-       notas, credito_tipo, total_bcv_credito, pedido_token))
+       notas, credito_tipo, total_bcv_credito, pedido_token,
+       vendedor_username, vendedor_nombre, vendedor_pct, subtotal_base, ganancia_vendedor, "Pendiente" if ganancia_vendedor > 0 else ""))
     pedido_id = q("SELECT last_insert_rowid() AS id", fetch=True)[0]["id"]
 
     credito_id = None
@@ -1829,6 +1865,7 @@ def aplicar_abono_validado(abono_id, admin_username):
           (admin_username, now(), abono_id))
         if int(ab["pedido_id"] or 0) > 0:
             q("UPDATE pedidos SET status='Finalizado / Pagado' WHERE id=?", (int(ab["pedido_id"]),))
+            actualizar_status_ganancia_pedido(int(ab["pedido_id"]), "Finalizado / Pagado")
         return True, f"Pago contado validado. Pedido #{int(ab['pedido_id'] or 0)} marcado como Finalizado / Pagado."
 
     cr_rows = q("SELECT * FROM creditos WHERE id=?", (credito_id,), fetch=True)
@@ -1847,6 +1884,7 @@ def aplicar_abono_validado(abono_id, admin_username):
           (nuevo_saldo_bcv, nuevo_saldo_bcv, nuevo_status, cr["id"]))
         if nuevo_status == "Pagado":
             q("UPDATE pedidos SET status='Finalizado / Pagado' WHERE id=?", (cr["pedido_id"],))
+            actualizar_status_ganancia_pedido(int(cr["pedido_id"]), "Finalizado / Pagado")
             q("""UPDATE abonos
                  SET status='Anulado',
                      notas=COALESCE(notas,'') || ?
@@ -1863,6 +1901,7 @@ def aplicar_abono_validado(abono_id, admin_username):
     q("UPDATE creditos SET saldo_usd=?, status=? WHERE id=?", (nuevo_saldo, nuevo_status, cr["id"]))
     if nuevo_status == "Pagado":
         q("UPDATE pedidos SET status='Finalizado / Pagado' WHERE id=?", (cr["pedido_id"],))
+        actualizar_status_ganancia_pedido(int(cr["pedido_id"]), "Finalizado / Pagado")
         q("""UPDATE abonos
              SET status='Anulado',
                  notas=COALESCE(notas,'') || ?
@@ -2058,7 +2097,146 @@ def producto_maneja_precio_especial(prod):
         except Exception:
             return False
 
-def producto_con_precio_para_usuario(prod, user=None):
+
+def usuario_es_vendedor(user):
+    try:
+        return str(user["rol"]).lower() == "vendedor" or int(user["vendedor_activo"] or 0) == 1
+    except Exception:
+        try:
+            return str(user.get("rol", "")).lower() == "vendedor" or int(user.get("vendedor_activo") or 0) == 1
+        except Exception:
+            return False
+
+def vendedor_info_para_cliente(cliente_user):
+    """
+    Retorna la configuración del vendedor asignado al cliente.
+    No aplica si el cliente no tiene vendedor asignado o si el vendedor está inactivo.
+    """
+    if not cliente_user:
+        return None
+    try:
+        vendedor_username = (cliente_user["vendedor_asignado_username"] or "").strip()
+    except Exception:
+        vendedor_username = (cliente_user.get("vendedor_asignado_username") or "").strip()
+    if not vendedor_username:
+        return None
+    vend = get_user(vendedor_username)
+    if not vend:
+        return None
+    try:
+        activo = int(vend["vendedor_activo"] or 0) == 1 or str(vend["rol"]).lower() == "vendedor"
+    except Exception:
+        activo = False
+    if not activo:
+        return None
+    try:
+        override = float(cliente_user["vendedor_comision_override_pct"] or 0)
+    except Exception:
+        override = 0.0
+    try:
+        pct = override if override > 0 else float(vend["vendedor_comision_pct"] or 0)
+    except Exception:
+        pct = 0.0
+    if pct <= 0:
+        return None
+    return {
+        "username": vend["username"],
+        "nombre": vend["nombre"] or vend["username"],
+        "pct": pct,
+    }
+
+def aplicar_incremento_vendedor_a_producto(data, cliente_user):
+    """
+    Aumenta los precios efectivos del producto para clientes asignados a vendedor.
+    El aumento es comisión adicional que se guarda aparte en el pedido.
+    """
+    info = vendedor_info_para_cliente(cliente_user)
+    data["_vendedor_incremento_aplicado"] = False
+    data["_vendedor_username"] = ""
+    data["_vendedor_nombre"] = ""
+    data["_vendedor_pct"] = 0.0
+    if not info:
+        return data
+
+    factor = 1 + (float(info["pct"]) / 100.0)
+    for campo in [
+        "precio_unidad", "precio_docena", "precio_bulto",
+        "precio_metro_detal", "precio_metro_mayor"
+    ]:
+        try:
+            val = float(data.get(campo) or 0)
+            if val > 0:
+                data[campo] = val * factor
+        except Exception:
+            pass
+
+    data["_vendedor_incremento_aplicado"] = True
+    data["_vendedor_username"] = info["username"]
+    data["_vendedor_nombre"] = info["nombre"]
+    data["_vendedor_pct"] = float(info["pct"])
+    return data
+
+def estado_ganancia_vendedor_por_status(status):
+    s = str(status or "").lower()
+    if "cancel" in s or "anulad" in s:
+        return "Anulada"
+    if "finalizado" in s or "pagado" in s:
+        return "Ganada"
+    return "Pendiente"
+
+def actualizar_status_ganancia_pedido(pedido_id, status=None):
+    rows = q("SELECT id,status,ganancia_vendedor_usd FROM pedidos WHERE id=?", (int(pedido_id),), fetch=True)
+    if not rows:
+        return
+    ped = rows[0]
+    if float(ped["ganancia_vendedor_usd"] or 0) <= 0:
+        return
+    st_g = estado_ganancia_vendedor_por_status(status or ped["status"])
+    q("UPDATE pedidos SET ganancia_vendedor_status=? WHERE id=?", (st_g, int(pedido_id)))
+
+def vendedor_resumen_financiero(vendedor_username):
+    rows = q("""SELECT * FROM pedidos
+                WHERE vendedor_username=?
+                AND COALESCE(ganancia_vendedor_usd,0)>0
+                ORDER BY id DESC""", (vendedor_username,), fetch=True)
+    ganada = pendiente = anulada = ventas = ventas_pagadas = 0.0
+    for r in rows:
+        total = float(r["total_usd"] or 0)
+        gan = float(r["ganancia_vendedor_usd"] or 0)
+        st_g = estado_ganancia_vendedor_por_status(r["status"])
+        ventas += total
+        if st_g == "Ganada":
+            ganada += gan
+            ventas_pagadas += total
+        elif st_g == "Anulada":
+            anulada += gan
+        else:
+            pendiente += gan
+    pagos = q("SELECT COALESCE(SUM(monto_usd),0) AS total FROM vendedor_pagos WHERE vendedor_username=?", (vendedor_username,), fetch=True)
+    pagado = float(pagos[0]["total"] or 0) if pagos else 0.0
+    return {
+        "pedidos": rows,
+        "ventas": ventas,
+        "ventas_pagadas": ventas_pagadas,
+        "ganada": ganada,
+        "pendiente": pendiente,
+        "anulada": anulada,
+        "pagado": pagado,
+        "saldo": ganada - pagado,
+    }
+
+def guardar_config_vendedor_usuario(username, vendedor_activo, vendedor_pct, vendedor_puede_crear, vendedor_asignado, vendedor_override):
+    q("""UPDATE usuarios SET
+         vendedor_activo=?,
+         vendedor_comision_pct=?,
+         vendedor_puede_crear_clientes=?,
+         vendedor_asignado_username=?,
+         vendedor_comision_override_pct=?
+         WHERE username=?""",
+      (1 if vendedor_activo else 0, float(vendedor_pct or 0), 1 if vendedor_puede_crear else 0,
+       (vendedor_asignado or "").strip(), float(vendedor_override or 0), username))
+
+def producto_con_precio_para_usuario(prod, user=None, aplicar_vendedor=True):
     """
     Devuelve una copia dict del producto con precios efectivos.
     Regla V58 optimizada:
@@ -2095,6 +2273,8 @@ def producto_con_precio_para_usuario(prod, user=None):
                 data["_precio_especial_aplicado"] = True
         except Exception:
             pass
+    if aplicar_vendedor:
+        data = aplicar_incremento_vendedor_a_producto(data, user)
     return data
 
 
@@ -2318,18 +2498,26 @@ def recalcular_item_carrito(item, nueva_cantidad=None, user=None):
     if user is None and item.get("cliente_precio_username"):
         user = get_user(item.get("cliente_precio_username"))
 
-    prod_precio = producto_con_precio_para_usuario(prod, user)
+    prod_precio_base = producto_con_precio_para_usuario(prod, user, aplicar_vendedor=False)
+    prod_precio = producto_con_precio_para_usuario(prod, user, aplicar_vendedor=True)
 
     cantidad = int(nueva_cantidad if nueva_cantidad is not None else item.get("cantidad_presentacion", 1))
     cantidad = max(1, cantidad)
     presentacion = item.get("presentacion", "unidad")
 
+    precio_calc_base = calcular_precio_inteligente(prod_precio_base, presentacion, cantidad)
     precio_calc = calcular_precio_inteligente(prod_precio, presentacion, cantidad)
     item["cantidad_presentacion"] = cantidad
     item["equivalencia"] = int(precio_calc["equivalencia"])
     item["unidades_base_total"] = int(precio_calc["unidades_base_total"])
     item["precio_presentacion"] = float(precio_calc["precio_presentacion"])
     item["precio_total"] = float(precio_calc["precio_total"])
+    item["precio_base_total"] = float(precio_calc_base["precio_total"])
+    item["vendedor_ganancia_usd"] = max(0.0, float(precio_calc["precio_total"]) - float(precio_calc_base["precio_total"]))
+    item["vendedor_incremento_aplicado"] = bool(prod_precio.get("_vendedor_incremento_aplicado", False))
+    item["vendedor_username"] = prod_precio.get("_vendedor_username", "")
+    item["vendedor_nombre"] = prod_precio.get("_vendedor_nombre", "")
+    item["vendedor_pct"] = float(prod_precio.get("_vendedor_pct", 0) or 0)
     item["escala_aplicada"] = precio_calc["escala_aplicada"]
     item["detalle_precio"] = precio_calc.get("detalle_precio", precio_calc["escala_aplicada"])
     item["presentacion_nombre"] = precio_calc.get("presentacion_nombre", producto_intermedia_nombre(prod_precio) if presentacion == "docena" else presentacion.title())
@@ -2343,6 +2531,8 @@ def recalcular_item_carrito(item, nueva_cantidad=None, user=None):
         item["cliente_precio_nombre"] = user["nombre"] or user["username"]
     if item["precio_especial_aplicado"]:
         item["detalle_precio"] = f"{item['detalle_precio']} · precio especial"
+    if item.get("vendedor_incremento_aplicado"):
+        item["detalle_precio"] = f"{item['detalle_precio']} · vendedor {item.get('vendedor_pct',0):.1f}%"
     return item
 
 
@@ -2471,6 +2661,7 @@ def anular_credito_de_pedido(pedido_id, motivo="Pedido cancelado"):
           (f"\n[{now()}] {motivo}", int(ped["credito_id"])))
         q("UPDATE abonos SET status='Anulado' WHERE credito_id=? AND status='Pendiente de validar'", (int(ped["credito_id"]),))
     q("UPDATE pedidos SET status='Cancelado' WHERE id=?", (int(pedido_id),))
+    actualizar_status_ganancia_pedido(int(pedido_id), "Cancelado")
     return True, "Pedido cancelado y crédito asociado anulado."
 
 def marcar_credito_pagado(credito_id, actor="admin"):
@@ -2562,6 +2753,7 @@ def marcar_credito_pagado(credito_id, actor="admin"):
         q("UPDATE creditos SET saldo_usd=0, status='Pagado' WHERE id=?", (credito_id,))
 
     q("UPDATE pedidos SET status='Finalizado / Pagado' WHERE id=?", (int(cr["pedido_id"]),))
+    actualizar_status_ganancia_pedido(int(cr["pedido_id"]), "Finalizado / Pagado")
 
     n_pend = len(pendientes)
     if n_pend:
@@ -3665,7 +3857,7 @@ def admin_usuarios():
 
     with tab1:
         df = pd.read_sql_query(
-            "SELECT id_usuario,username,email,nombre,rol,telefono,rif,ciudad,activo,cliente_especial,credito_habilitado,credito_bcv_habilitado,ml_envio,limite_credito_usd,dias_credito FROM usuarios ORDER BY rol,nombre",
+            "SELECT id_usuario,username,email,nombre,rol,telefono,rif,ciudad,activo,cliente_especial,credito_habilitado,credito_bcv_habilitado,ml_envio,limite_credito_usd,dias_credito,vendedor_activo,vendedor_comision_pct,vendedor_asignado_username,vendedor_comision_override_pct FROM usuarios ORDER BY rol,nombre",
             get_conn()
         )
         st.dataframe(df, use_container_width=True, hide_index=True)
@@ -3785,6 +3977,26 @@ def admin_usuarios():
             ml_envio = c10.checkbox("ML / ENVÍO", value=bool(edit_row["ml_envio"]) if edit_row else False, help="Activa cálculo sugerido de envío por peso para clientes MercadoLibre o fuera del estado.")
             limite = c11.number_input("Límite crédito USD", min_value=0.0, value=float(edit_row["limite_credito_usd"] if edit_row else 0), step=1.0)
             dias = c12.number_input("Días crédito", min_value=1, max_value=90, value=int(edit_row["dias_credito"] if edit_row else parse_float(get_config("dias_credito_default","10"), 10)))
+            st.markdown("### Configuración de vendedor / cliente asignado")
+            vend_rows = q("SELECT username,nombre FROM usuarios WHERE activo=1 AND (rol='vendedor' OR COALESCE(vendedor_activo,0)=1) ORDER BY nombre,username", fetch=True)
+            vend_opts = ["Sin vendedor asignado"] + [f"{v['nombre'] or v['username']} — {v['username']}" for v in vend_rows]
+            vend_map = {f"{v['nombre'] or v['username']} — {v['username']}": v["username"] for v in vend_rows}
+            vend_actual = edit_row["vendedor_asignado_username"] if edit_row and "vendedor_asignado_username" in edit_row.keys() and edit_row["vendedor_asignado_username"] else ""
+            vend_index = 0
+            if vend_actual:
+                for i, label in enumerate(vend_opts):
+                    if vend_map.get(label) == vend_actual:
+                        vend_index = i
+                        break
+
+            vc1, vc2, vc3, vc4, vc5 = st.columns(5)
+            vendedor_activo = vc1.checkbox("Es vendedor activo", value=bool(edit_row["vendedor_activo"]) if edit_row and "vendedor_activo" in edit_row.keys() else (rol == "vendedor"))
+            vendedor_pct = vc2.number_input("Ganancia vendedor %", min_value=0.0, max_value=50.0, value=float(edit_row["vendedor_comision_pct"] if edit_row and "vendedor_comision_pct" in edit_row.keys() and edit_row["vendedor_comision_pct"] else (5.0 if rol == "vendedor" else 0.0)), step=0.5)
+            vendedor_puede_crear = vc3.checkbox("Puede crear clientes", value=bool(edit_row["vendedor_puede_crear_clientes"]) if edit_row and "vendedor_puede_crear_clientes" in edit_row.keys() else True)
+            vendedor_asignado_label = vc4.selectbox("Vendedor asignado", vend_opts, index=vend_index, help="Para clientes: define qué vendedor le suma comisión.")
+            vendedor_override = vc5.number_input("Override % cliente", min_value=0.0, max_value=50.0, value=float(edit_row["vendedor_comision_override_pct"] if edit_row and "vendedor_comision_override_pct" in edit_row.keys() and edit_row["vendedor_comision_override_pct"] else 0.0), step=0.5, help="0 usa el % del vendedor. Si pones 7, ese cliente usa 7%.")
+            vendedor_asignado = vend_map.get(vendedor_asignado_label, "")
+
             activo = st.checkbox("Activo", value=bool(edit_row["activo"]) if edit_row else True)
             password = st.text_input("Contraseña nueva / inicial", type="password", help="Déjala vacía para conservar la actual si estás editando. En usuarios nuevos, si la dejas vacía será 1234.")
 
@@ -3795,6 +4007,7 @@ def admin_usuarios():
         if submit_create:
             ok, msg = crear_usuario_admin(username, password, nombre, rol, telefono, rif, ciudad, direccion, email, cliente_especial, credito_hab, credito_bcv_hab, ml_envio, limite, dias, activo)
             if ok:
+                guardar_config_vendedor_usuario(username, vendedor_activo, vendedor_pct, vendedor_puede_crear, vendedor_asignado, vendedor_override)
                 set_feedback(msg, "success")
                 st.rerun()
             else:
@@ -3803,6 +4016,7 @@ def admin_usuarios():
         if submit_update:
             ok, msg = actualizar_usuario_admin(username_original, username, nombre, rol, telefono, rif, ciudad, direccion, email, cliente_especial, credito_hab, credito_bcv_hab, ml_envio, limite, dias, activo, password)
             if ok:
+                guardar_config_vendedor_usuario(username, vendedor_activo, vendedor_pct, vendedor_puede_crear, vendedor_asignado, vendedor_override)
                 set_feedback(msg, "success")
                 st.rerun()
             else:
@@ -6884,151 +7098,226 @@ def publicaciones():
 
 
 def vendedores_asignaciones():
-    st.title("👤 Vendedores / Asignaciones")
-    st.caption("Panel comercial para asignar productos, revisar pendientes y copiar una lista para WhatsApp.")
+    st.title("👤 Vendedores / Clientes / Comisiones")
+    st.caption("Control de vendedores, clientes asignados, incremento automático y cuenta por pagar al vendedor.")
 
-    vendedores = q("SELECT username,nombre FROM usuarios WHERE rol IN ('vendedor','comprador','admin') AND activo=1 ORDER BY nombre", fetch=True)
-    if not vendedores:
-        st.info("No hay usuarios activos.")
-        return
+    user_actual = get_user(st.session_state.user["username"])
 
-    opts = {f"{v['nombre'] or v['username']} — {v['username']}": v for v in vendedores}
-    vend = opts[st.selectbox("Vendedor / responsable", list(opts.keys()))]
+    if user_actual["rol"] == "admin":
+        vendedores = q("""SELECT username,nombre,vendedor_comision_pct FROM usuarios
+                          WHERE activo=1 AND (rol='vendedor' OR COALESCE(vendedor_activo,0)=1)
+                          ORDER BY nombre,username""", fetch=True)
+        if not vendedores:
+            st.info("No hay vendedores activos. Crea un usuario con rol vendedor o marca 'Es vendedor activo' en Usuarios.")
+            return
+        opts = {f"{v['nombre'] or v['username']} — {v['username']} ({float(v['vendedor_comision_pct'] or 0):.1f}%)": v for v in vendedores}
+        vend = opts[st.selectbox("Vendedor", list(opts.keys()))]
+    else:
+        vend = user_actual
+        if not usuario_es_vendedor(vend):
+            st.warning("Tu usuario no está marcado como vendedor activo.")
+            return
 
-    asign = q("""SELECT p.*, c.nombre AS categoria, pv.fecha_asignacion
-                 FROM productos_vendedores pv
-                 JOIN productos p ON p.sku=pv.sku
-                 LEFT JOIN categorias c ON p.categoria_id=c.id
-                 WHERE pv.vendedor_username=? AND p.activo=1
-                 ORDER BY p.descripcion""", (vend["username"],), fetch=True)
+    vend_username = vend["username"]
+    vend_nombre = vend["nombre"] or vend_username
+    vend_pct = float(vend["vendedor_comision_pct"] if "vendedor_comision_pct" in vend.keys() and vend["vendedor_comision_pct"] else 0)
 
-    total_asig = len(asign)
-    con_stock = sum(1 for p in asign if int(p["wc_stock"] or 0) > 0)
-    pend_ig = sum(1 for p in asign if not int(p["pub_instagram"] or 0))
-    pend_ml = sum(1 for p in asign if not int(p["pub_mercadolibre"] or 0))
+    resumen = vendedor_resumen_financiero(vend_username)
+    clientes = q("""SELECT username,nombre,telefono,rif,ciudad,activo,vendedor_comision_override_pct
+                    FROM usuarios
+                    WHERE vendedor_asignado_username=?
+                    ORDER BY nombre,username""", (vend_username,), fetch=True)
 
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Asignados", total_asig)
-    k2.metric("Con stock", con_stock)
-    k3.metric("Pend. Instagram", pend_ig)
-    k4.metric("Pend. MercadoLibre", pend_ml)
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Clientes asignados", len(clientes))
+    k2.metric("Ventas totales", money_usd(resumen["ventas"]))
+    k3.metric("Ganancia ganada", money_usd(resumen["ganada"]))
+    k4.metric("Ganancia pendiente", money_usd(resumen["pendiente"]))
+    k5.metric("Saldo por pagar", money_usd(resumen["saldo"]))
 
-    tab1, tab2, tab3 = st.tabs(["Panel del vendedor", "Asignar productos", "Texto para WhatsApp"])
+    tab_dash, tab_clientes, tab_crear, tab_pagos, tab_productos = st.tabs([
+        "Dashboard vendedor",
+        "Clientes asignados",
+        "Crear cliente",
+        "Pagos al vendedor",
+        "Productos asignados"
+    ])
 
-    with tab1:
-        f1, f2, f3 = st.columns([2, 1.2, 1.2])
-        bus = f1.text_input("Buscar asignados", placeholder="SKU o descripción")
-        filtro = f2.selectbox("Filtro", ["Todos", "Con stock", "Sin stock", "Pendientes publicación", "Pendientes Instagram", "Pendientes MercadoLibre"])
-        ordenar = f3.selectbox("Ordenar", ["Descripción", "Stock mayor", "Stock menor", "Categoría"])
+    with tab_dash:
+        st.subheader(f"Dashboard de {vend_nombre}")
+        st.caption(f"Comisión base configurada: {vend_pct:.2f}%")
+        pedidos = resumen["pedidos"]
+        if not pedidos:
+            st.info("Este vendedor aún no tiene pedidos con ganancia registrada.")
+        else:
+            dfp = pd.DataFrame([dict(r) for r in pedidos])
+            # Estado dinámico de la ganancia según el estado real del pedido.
+            dfp["ganancia_estado_real"] = dfp["status"].apply(estado_ganancia_vendedor_por_status)
+            mostrar = dfp[[
+                "id","fecha","cliente_nombre","status","total_usd","subtotal_base_usd",
+                "ganancia_vendedor_usd","ganancia_estado_real"
+            ]].copy()
+            mostrar = mostrar.rename(columns={
+                "id": "Pedido",
+                "fecha": "Fecha",
+                "cliente_nombre": "Cliente",
+                "status": "Estado pedido",
+                "total_usd": "Total cliente",
+                "subtotal_base_usd": "Base sin comisión",
+                "ganancia_vendedor_usd": "Ganancia vendedor",
+                "ganancia_estado_real": "Estado ganancia",
+            })
+            st.dataframe(mostrar, use_container_width=True, hide_index=True)
 
-        lista = list(asign)
-        if bus:
-            b = bus.lower()
-            lista = [p for p in lista if b in str(p["sku"]).lower() or b in str(p["descripcion"]).lower()]
-        if filtro == "Con stock":
-            lista = [p for p in lista if int(p["wc_stock"] or 0) > 0]
-        elif filtro == "Sin stock":
-            lista = [p for p in lista if int(p["wc_stock"] or 0) <= 0]
-        elif filtro == "Pendientes publicación":
-            lista = [p for p in lista if pendientes_publicacion(p)]
-        elif filtro == "Pendientes Instagram":
-            lista = [p for p in lista if not int(p["pub_instagram"] or 0)]
-        elif filtro == "Pendientes MercadoLibre":
-            lista = [p for p in lista if not int(p["pub_mercadolibre"] or 0)]
+            st.markdown("#### Detalle por estado")
+            c1, c2, c3 = st.columns(3)
+            ganados = mostrar[mostrar["Estado ganancia"] == "Ganada"]
+            pend = mostrar[mostrar["Estado ganancia"] == "Pendiente"]
+            anul = mostrar[mostrar["Estado ganancia"] == "Anulada"]
+            c1.metric("Pedidos ganados", len(ganados), money_usd(float(ganados["Ganancia vendedor"].sum() if not ganados.empty else 0)))
+            c2.metric("Pedidos pendientes", len(pend), money_usd(float(pend["Ganancia vendedor"].sum() if not pend.empty else 0)))
+            c3.metric("Pedidos anulados", len(anul), money_usd(float(anul["Ganancia vendedor"].sum() if not anul.empty else 0)))
 
-        if ordenar == "Stock mayor":
-            lista = sorted(lista, key=lambda x: int(x["wc_stock"] or 0), reverse=True)
-        elif ordenar == "Stock menor":
-            lista = sorted(lista, key=lambda x: int(x["wc_stock"] or 0))
-        elif ordenar == "Categoría":
-            lista = sorted(lista, key=lambda x: str(x["categoria"] or ""))
+    with tab_clientes:
+        st.subheader("Clientes asignados")
+        if user_actual["rol"] == "admin":
+            st.caption("Puedes asignar o quitar clientes desde Usuarios, o rápido desde esta tabla.")
+        if not clientes:
+            st.info("No hay clientes asignados a este vendedor.")
+        else:
+            dfc = pd.DataFrame([dict(c) for c in clientes])
+            st.dataframe(dfc, use_container_width=True, hide_index=True)
 
-        if not lista:
-            st.info("No hay productos asignados que coincidan.")
-        for p in lista:
-            disp = disponibilidad(p)
-            pend = pendientes_publicacion(p)
-            pend_txt = ", ".join(pend) if pend else "Completo"
-            with st.container():
-                col_img, col_info, col_acc = st.columns([0.8, 3.2, 1.2])
-                with col_img:
-                    if p["wc_imagen_url"]:
-                        st.image(p["wc_imagen_url"], width=95)
-                    else:
-                        st.markdown("<div style='height:90px;border-radius:10px;background:#f3f4f6;display:flex;align-items:center;justify-content:center;font-size:26px'>📦</div>", unsafe_allow_html=True)
-                with col_info:
-                    st.markdown(f"**{p['descripcion']}**")
-                    st.caption(f"{p['sku']} · {p['categoria'] or 'Sin categoría'} · {resumen_publicacion_icons(p)}")
-                    st.write(f"Stock: **{p['wc_stock'] or 0} und** · Bultos: **{disp['bultos']}** · Pendiente: **{pend_txt}**")
-                    st.caption(f"Unidad: {money_usd(p['precio_unidad'])} · Docena c/u: {money_usd(p['precio_docena'])} · Bulto c/u: {money_usd(p['precio_bulto'])}")
-                with col_acc:
-                    if st.button("Quitar", key=f"quita_asig_{vend['username']}_{p['sku']}", use_container_width=True):
-                        q("DELETE FROM productos_vendedores WHERE sku=? AND vendedor_username=?", (p["sku"], vend["username"]))
-                        st.warning("Producto quitado.")
-                        st.rerun()
-                st.markdown("---")
+        if user_actual["rol"] == "admin":
+            st.markdown("#### Asignación rápida")
+            clientes_all = q("""SELECT username,nombre,vendedor_asignado_username FROM usuarios
+                                WHERE activo=1 AND rol NOT IN ('admin','vendedor','vendedor_mercadolibre')
+                                ORDER BY nombre,username""", fetch=True)
+            if clientes_all:
+                opts_cli = {f"{c['nombre'] or c['username']} — {c['username']}": c["username"] for c in clientes_all}
+                sel_cli = st.selectbox("Cliente", list(opts_cli.keys()), key=f"asig_cli_{vend_username}")
+                ov = st.number_input("Override % para este cliente (0 usa % del vendedor)", min_value=0.0, max_value=50.0, value=0.0, step=0.5)
+                cA, cB = st.columns(2)
+                if cA.button("Asignar a este vendedor", use_container_width=True):
+                    q("UPDATE usuarios SET vendedor_asignado_username=?, vendedor_comision_override_pct=? WHERE username=?",
+                      (vend_username, float(ov or 0), opts_cli[sel_cli]))
+                    st.success("Cliente asignado.")
+                    st.rerun()
+                if cB.button("Quitar vendedor asignado", use_container_width=True):
+                    q("UPDATE usuarios SET vendedor_asignado_username='', vendedor_comision_override_pct=0 WHERE username=?",
+                      (opts_cli[sel_cli],))
+                    st.warning("Cliente sin vendedor asignado.")
+                    st.rerun()
 
-    with tab2:
-        productos = q("""SELECT p.*, c.nombre AS categoria FROM productos p
-                         LEFT JOIN categorias c ON p.categoria_id=c.id
-                         WHERE p.activo=1 ORDER BY p.descripcion""", fetch=True)
-        asignados = {r["sku"] for r in q("SELECT sku FROM productos_vendedores WHERE vendedor_username=?", (vend["username"],), fetch=True)}
-
-        a1, a2, a3 = st.columns([2.5, 1.3, 1.3])
-        bus2 = a1.text_input("Buscar producto para asignar", placeholder="SKU o descripción")
-        solo_stock = a2.checkbox("Solo con stock")
-        solo_no_asignados = a3.checkbox("Solo no asignados")
-
-        filtrados = []
-        for p in productos:
-            if bus2 and bus2.lower() not in p["sku"].lower() and bus2.lower() not in p["descripcion"].lower():
-                continue
-            if solo_stock and int(p["wc_stock"] or 0) <= 0:
-                continue
-            if solo_no_asignados and p["sku"] in asignados:
-                continue
-            filtrados.append(p)
-
-        st.caption(f"{len(filtrados)} productos disponibles para revisar.")
-        for p in filtrados:
-            checked = p["sku"] in asignados
-            nuevo = st.checkbox(f"{p['descripcion']} — {p['sku']} | Stock {p['wc_stock'] or 0}", value=checked, key=f"asig_{vend['username']}_{p['sku']}")
-            if nuevo != checked:
-                if nuevo:
-                    q("""INSERT OR IGNORE INTO productos_vendedores (sku,vendedor_username,fecha_asignacion,notas)
-                         VALUES (?,?,?,?)""", (p["sku"], vend["username"], now(), ""))
+    with tab_crear:
+        puede_crear = user_actual["rol"] == "admin" or int(vend["vendedor_puede_crear_clientes"] if "vendedor_puede_crear_clientes" in vend.keys() and vend["vendedor_puede_crear_clientes"] else 0) == 1
+        if not puede_crear:
+            st.warning("Este vendedor no tiene permiso para crear clientes.")
+        else:
+            st.subheader("Crear cliente asignado al vendedor")
+            st.caption("El cliente queda asignado automáticamente al vendedor seleccionado.")
+            with st.form(f"crear_cliente_vendedor_{vend_username}"):
+                c1, c2 = st.columns(2)
+                username = c1.text_input("Usuario / login del cliente", placeholder="correo o usuario")
+                nombre = c2.text_input("Nombre / razón social")
+                email = c1.text_input("Correo", value=username if "@" in username else "")
+                telefono = c2.text_input("Teléfono")
+                rif = c1.text_input("RIF / CI")
+                ciudad = c2.text_input("Ciudad")
+                direccion = st.text_area("Dirección")
+                password = st.text_input("Contraseña inicial", type="password", value="1234")
+                ml_envio = st.checkbox("ML / ENVÍO", value=False)
+                credito = st.checkbox("Crédito habilitado", value=False)
+                override_pct = st.number_input("Override % comisión para este cliente", min_value=0.0, max_value=50.0, value=0.0, step=0.5, help="0 usa el porcentaje del vendedor.")
+                submit = st.form_submit_button("Crear cliente asignado", type="primary")
+            if submit:
+                ok, msg = crear_usuario_admin(username, password, nombre, "comprador", telefono, rif, ciudad, direccion, email, False, credito, False, ml_envio, 0, int(parse_float(get_config("dias_credito_default","10"), 10)), True)
+                if ok:
+                    guardar_config_vendedor_usuario(username, False, 0, True, vend_username, override_pct)
+                    st.success(f"{msg} Asignado a {vend_nombre}.")
+                    st.rerun()
                 else:
-                    q("DELETE FROM productos_vendedores WHERE sku=? AND vendedor_username=?", (p["sku"], vend["username"]))
-                st.rerun()
+                    st.error(msg)
 
-    with tab3:
-        modo = st.selectbox("Tipo de lista", ["Todos asignados", "Solo con stock", "Pendientes Instagram", "Pendientes MercadoLibre", "Pendientes publicación"])
-        lista = list(asign)
-        if modo == "Solo con stock":
-            lista = [p for p in lista if int(p["wc_stock"] or 0) > 0]
-        elif modo == "Pendientes Instagram":
-            lista = [p for p in lista if not int(p["pub_instagram"] or 0)]
-        elif modo == "Pendientes MercadoLibre":
-            lista = [p for p in lista if not int(p["pub_mercadolibre"] or 0)]
-        elif modo == "Pendientes publicación":
-            lista = [p for p in lista if pendientes_publicacion(p)]
+    with tab_pagos:
+        st.subheader("Cuenta del vendedor")
+        r = vendedor_resumen_financiero(vend_username)
+        p1, p2, p3 = st.columns(3)
+        p1.metric("Ganancia ganada", money_usd(r["ganada"]))
+        p2.metric("Pagado al vendedor", money_usd(r["pagado"]))
+        p3.metric("Saldo pendiente", money_usd(r["saldo"]))
 
-        lineas = [f"Hola {vend['nombre'] or vend['username']} 👋", "", f"Lista asignada ({modo}):", ""]
-        for i, p in enumerate(lista, start=1):
-            disp = disponibilidad(p)
-            pend = pendientes_publicacion(p)
-            pend_txt = ", ".join(pend) if pend else "Completo"
-            lineas += [
-                f"{i}. {p['sku']}",
-                f"{p['descripcion']}",
-                f"Stock: {p['wc_stock'] or 0} unidades / {disp['bultos']} bultos",
-                f"Unidad: {money_usd(p['precio_unidad'])} | Docena c/u: {money_usd(p['precio_docena'])} | Bulto c/u: {money_usd(p['precio_bulto'])}",
-                f"Pendiente: {pend_txt}",
-                ""
-            ]
-        texto = "\\n".join(lineas).strip()
-        st.text_area("Texto para copiar a WhatsApp", value=texto, height=380)
-        st.download_button("⬇️ Descargar lista TXT", data=texto.encode("utf-8"), file_name=f"lista_{vend['username']}.txt", mime="text/plain", use_container_width=True)
+        pagos = pd.read_sql_query("SELECT fecha,monto_usd,metodo,referencia,notas,creado_por FROM vendedor_pagos WHERE vendedor_username=? ORDER BY id DESC", get_conn(), params=(vend_username,))
+        st.dataframe(pagos, use_container_width=True, hide_index=True)
+
+        if user_actual["rol"] == "admin":
+            st.markdown("#### Registrar pago al vendedor")
+            with st.form(f"pago_vendedor_{vend_username}"):
+                monto = st.number_input("Monto pagado USD", min_value=0.0, value=max(0.0, float(r["saldo"])), step=1.0)
+                metodo = st.text_input("Método", placeholder="Efectivo, transferencia, Zelle...")
+                referencia = st.text_input("Referencia")
+                notas = st.text_area("Notas")
+                submit = st.form_submit_button("Registrar pago", type="primary")
+            if submit:
+                if monto <= 0:
+                    st.error("El monto debe ser mayor a 0.")
+                else:
+                    q("""INSERT INTO vendedor_pagos
+                         (vendedor_username,fecha,monto_usd,metodo,referencia,notas,creado_por,creado_en)
+                         VALUES (?,?,?,?,?,?,?,?)""",
+                      (vend_username, now(), float(monto), metodo, referencia, notas, user_actual["username"], now()))
+                    st.success("Pago registrado.")
+                    st.rerun()
+        else:
+            st.caption("Solo admin puede registrar pagos al vendedor.")
+
+    with tab_productos:
+        st.subheader("Productos asignados al vendedor")
+        st.caption("Este apartado conserva la asignación comercial de productos para seguimiento/publicación.")
+
+        asign = q("""SELECT p.*, c.nombre AS categoria, pv.fecha_asignacion
+                     FROM productos_vendedores pv
+                     JOIN productos p ON p.sku=pv.sku
+                     LEFT JOIN categorias c ON p.categoria_id=c.id
+                     WHERE pv.vendedor_username=? AND p.activo=1
+                     ORDER BY p.descripcion""", (vend_username,), fetch=True)
+        st.metric("Productos asignados", len(asign))
+        if asign:
+            df_asig = pd.DataFrame([{
+                "SKU": p["sku"],
+                "Descripción": p["descripcion"],
+                "Categoría": p["categoria"],
+                "Stock": p["wc_stock"],
+                "IG": "✅" if int(p["pub_instagram"] or 0) else "❌",
+                "ML": "✅" if int(p["pub_mercadolibre"] or 0) else "❌",
+                "Marketplace": "✅" if int(p["pub_marketplace"] or 0) else "❌",
+            } for p in asign])
+            st.dataframe(df_asig, use_container_width=True, hide_index=True)
+        else:
+            st.info("No hay productos asignados.")
+
+        if user_actual["rol"] == "admin":
+            productos = q("""SELECT sku,descripcion,wc_stock FROM productos WHERE activo=1 ORDER BY descripcion""", fetch=True)
+            if productos:
+                st.markdown("#### Asignar/quitar productos")
+                bus = st.text_input("Buscar producto", key=f"buscar_prod_vend_{vend_username}")
+                asignados = {r["sku"] for r in q("SELECT sku FROM productos_vendedores WHERE vendedor_username=?", (vend_username,), fetch=True)}
+                for p in productos:
+                    if bus and bus.lower() not in p["sku"].lower() and bus.lower() not in p["descripcion"].lower():
+                        continue
+                    checked = p["sku"] in asignados
+                    nuevo = st.checkbox(f"{p['descripcion']} — {p['sku']} | Stock {p['wc_stock'] or 0}", value=checked, key=f"asig_prod_{vend_username}_{p['sku']}")
+                    if nuevo != checked:
+                        if nuevo:
+                            q("""INSERT OR IGNORE INTO productos_vendedores (sku,vendedor_username,fecha_asignacion,notas)
+                                 VALUES (?,?,?,?)""", (p["sku"], vend_username, now(), ""))
+                        else:
+                            q("DELETE FROM productos_vendedores WHERE sku=? AND vendedor_username=?", (p["sku"], vend_username))
+                        st.rerun()
+        else:
+            st.caption("Solo admin puede modificar asignaciones de productos.")
+
+
 
 
 # -----------------------------
@@ -7046,23 +7335,42 @@ def dialog_imagen(nombre, sku, url):
 def cliente_activo_para_venta(user):
     """
     Cliente comercial usado para mostrar precios y recalcular carrito.
-    En admin permite preparar carrito para un cliente específico.
+    En admin permite preparar carrito para cualquier cliente.
+    En vendedor permite preparar carrito solo para sus clientes asignados.
     """
-    if user["rol"] == "admin":
+    if user["rol"] in ["admin", "vendedor"]:
         uname = st.session_state.get("cliente_venta_activo_username")
         if uname:
             u = get_user(uname)
             if u:
-                return u
+                if user["rol"] == "admin":
+                    return u
+                try:
+                    if u["vendedor_asignado_username"] == user["username"]:
+                        return u
+                except Exception:
+                    pass
     return user
 
 def selector_cliente_venta_admin(user, key="cliente_venta_selector"):
-    if user["rol"] != "admin":
+    if user["rol"] not in ["admin", "vendedor"]:
         return user
-    usuarios_cliente = q("SELECT username,nombre FROM usuarios WHERE activo=1 ORDER BY nombre,username", fetch=True)
+
+    if user["rol"] == "admin":
+        usuarios_cliente = q("SELECT username,nombre,vendedor_asignado_username FROM usuarios WHERE activo=1 ORDER BY nombre,username", fetch=True)
+        texto_default = "Usar mi usuario admin"
+    else:
+        usuarios_cliente = q("""SELECT username,nombre,vendedor_asignado_username FROM usuarios
+                                WHERE activo=1 AND vendedor_asignado_username=?
+                                ORDER BY nombre,username""", (user["username"],), fetch=True)
+        texto_default = "Usar mi usuario vendedor"
+
     if not usuarios_cliente:
+        if user["rol"] == "vendedor":
+            st.info("Aún no tienes clientes asignados. Créalo o pídele al admin que te lo asigne.")
         return user
-    opts = ["Usar mi usuario admin"] + [f"{u['nombre'] or u['username']} — {u['username']}" for u in usuarios_cliente]
+
+    opts = [texto_default] + [f"{u['nombre'] or u['username']} — {u['username']}" for u in usuarios_cliente]
     mapa = {f"{u['nombre'] or u['username']} — {u['username']}": u["username"] for u in usuarios_cliente}
     actual = st.session_state.get("cliente_venta_activo_username")
     index = 0
@@ -7072,7 +7380,7 @@ def selector_cliente_venta_admin(user, key="cliente_venta_selector"):
                 index = i
                 break
     sel = st.selectbox("Ver/preparar pedido para cliente", opts, index=index, key=key)
-    if sel == "Usar mi usuario admin":
+    if sel == texto_default:
         st.session_state["cliente_venta_activo_username"] = None
         return user
     st.session_state["cliente_venta_activo_username"] = mapa[sel]
